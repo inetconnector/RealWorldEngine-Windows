@@ -196,6 +196,18 @@
       "ruins"
     ]
   },
+  "genesis_image": {
+    "description": "Optionales Startbild (URL). Wird vor Iteration 1 geladen, analysiert und als Genesis in die Logdatei geschrieben.",
+    "effects": [
+      "Erzeugt eine ausführliche Analyse (Caption, Keywords, Farben, Statistik)",
+      "Seedet die Motivbank mit erkannten Keywords",
+      "Dient als Referenz-Embedding für die erste Iteration"
+    ],
+    "values": {
+      "url": "",
+      "analysis_keywords": 12
+    }
+  },
   "slideshow": {
     "description": "Konfiguration für die Slideshow im Run-Ordner.",
     "effects": [
