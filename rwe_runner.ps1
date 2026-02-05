@@ -272,18 +272,6 @@ function Install-Git {
     if (-not (Command-Exists "git.exe")) { throw "git.exe not found after installation." }
 }
 
-function Backup-Path {
-    param([string]$PathToBackup,[string]$BakRoot)
-    if (-not (Test-Path -LiteralPath $PathToBackup)) { return }
-    Ensure-Folder $BakRoot
-    $ts = (Get-Date).ToString("yyyyMMdd-HHmmss")
-    $dstDir = Join-Path $BakRoot $ts
-    Ensure-Folder $dstDir
-    $name = [IO.Path]::GetFileName($PathToBackup)
-    $dst = Join-Path $dstDir $name
-    Copy-Item -LiteralPath $PathToBackup -Destination $dst -Force
-}
-
 function Copy-FileSafe {
     param([string]$Src,[string]$Dst)
     try {
@@ -1241,16 +1229,11 @@ try {
     $scriptDir = Get-ScriptDir
     if ([string]::IsNullOrWhiteSpace($scriptDir)) { throw "Could not determine script directory." }
 
-    $bakRoot = Join-Path $scriptDir "bak"
     $configPath = Join-Path $scriptDir "rwe_config.json"
 
     if (-not (Test-Path -LiteralPath $configPath)) {
         throw "Missing rwe_config.json next to this ps1."
     }
-
-    Write-Section "Backup (script + config)"
-    Backup-Path -PathToBackup $configPath -BakRoot $bakRoot
-    Backup-Path -PathToBackup $scriptPath -BakRoot $bakRoot
 
     Write-Section "Validate config"
     Validate-Config -ConfigPath $configPath
@@ -1273,21 +1256,19 @@ try {
 
     Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
 
-    $appDir   = Join-Path $runRoot "app"
+    $appDir   = Join-Path $scriptDir "app"
+    $cacheDir = Join-Path $scriptDir "cache"
+    $venvDir  = Join-Path $scriptDir "venv"
     $outDir   = Join-Path $runRoot "outputs"
-    $cacheDir = Join-Path $runRoot "cache"
-    $venvDir  = Join-Path $runRoot "venv"
 
     Ensure-Folder $appDir
-    Ensure-Folder $outDir
     Ensure-Folder $cacheDir
+    Ensure-Folder $outDir
 
     $runConfig = Join-Path $runRoot "rwe_config.json"
     if (-not (Test-Path -LiteralPath $runConfig)) {
         Copy-FileSafe -Src $configPath -Dst $runConfig
     }
-
-    Copy-FileSafe -Src $scriptPath -Dst (Join-Path $runRoot ([IO.Path]::GetFileName($scriptPath)))
 
     $env:HF_HOME = $cacheDir
 
