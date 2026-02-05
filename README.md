@@ -1,6 +1,6 @@
 # RWE v0.4 (config-driven runner)
 
-This repository contains a **Windows PowerShell 5.1** runner that bootstraps a Python 3.10 virtual environment, writes a self-contained `rwe_v04.py`, runs the generation loop, produces an **atlas PDF**, and opens it automatically.
+This repository contains a **Windows PowerShell 5.1** runner that bootstraps a Python 3.10 virtual environment, auto-detects the best PyTorch backend (CUDA / DirectML / CPU), writes a self-contained `rwe_v04.py`, runs the generation loop, produces an **atlas PDF**, and opens it automatically.
 
 The behavior of the series (seed motifs, stopwords, anti-hallway filters, style rotation, novelty injection, escape motifs) is configured via a single JSON file: **`rwe_config.json`**.
 
@@ -11,6 +11,7 @@ The behavior of the series (seed motifs, stopwords, anti-hallway filters, style 
 - Automatic **backup** of existing config/script files into `bak\YYYYMMDD-HHMMSS\...`
 - **Config validation** with clear errors if required fields are missing
 - **Resume mode**: continue an existing run using its existing `world_state.json` / `world_log.jsonl`
+- **Backend auto-detection** (CUDA → DirectML → CPU) with verification + fallback
 - Outputs:
   - PNG images for each iteration
   - embeddings `.npy`
@@ -21,12 +22,12 @@ The behavior of the series (seed motifs, stopwords, anti-hallway filters, style 
 ## Quick start (Windows)
 
 1. Place these files in a folder:
-   - `run_rwe.ps1`
+   - `rwe_runner.ps1`
    - `rwe_config.json`
 2. Right-click **PowerShell** → “Run as Administrator” (or just run the script; it self-elevates).
 3. Run:
    ```powershell
-   .\run_rwe.ps1
+   .\rwe_runner.ps1
    ```
 4. Choose:
    - iterations (default from config)
@@ -73,6 +74,16 @@ On startup, you can choose resume mode:
 - The script continues using that folder’s existing state/logs.
 - The existing `rwe_config.json` inside the run folder is kept as the active config for that run.
 
+## Backend selection
+
+On startup, the runner detects the GPU(s), verifies CUDA availability, and selects the best backend:
+
+1. **CUDA** if an NVIDIA GPU and `nvidia-smi` are available (then verified in Python).
+2. **DirectML** for AMD/Intel (or NVIDIA without CUDA), then verified in Python.
+3. **CPU** fallback if the GPU backends fail verification.
+
+The verified backend is exposed to Python via `RWE_BACKEND` and used by the embedded runner.
+
 ## Notes
 
 - Default backend preference is SDXL; if SDXL load fails, it falls back to SD 1.5.
@@ -81,6 +92,6 @@ On startup, you can choose resume mode:
 
 ## Files
 
-- `run_rwe.ps1` – complete runner/installer (PowerShell 5.1 compatible)
+- `rwe_runner.ps1` – complete runner/installer (PowerShell 5.1 compatible)
 - `rwe_config.json` – config + explanations
 - `LICENSE` – Unlicense (public domain dedication, where permitted)
