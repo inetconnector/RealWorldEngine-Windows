@@ -54,6 +54,134 @@ function Ensure-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = [Net
 function Ensure-Folder { param([string]$Path) if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null } }
 function Command-Exists { param([string]$Name) try { (Get-Command $Name -ErrorAction SilentlyContinue) -ne $null } catch { $false } }
 
+function Get-VideoControllers {
+    try {
+        return Get-CimInstance Win32_VideoController -ErrorAction Stop
+    } catch {
+        return @()
+    }
+}
+
+function Test-CommandExists {
+    param([Parameter(Mandatory=$true)][string]$Name)
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    return ($cmd -ne $null)
+}
+
+function Get-PreferredBackend {
+    $gpus = Get-VideoControllers
+    $names = @($gpus | ForEach-Object { $_.Name } | Where-Object { $_ })
+    $joined = ($names -join " | ").ToLowerInvariant()
+
+    $hasNvidia = $joined -match "nvidia"
+    $hasAmd    = $joined -match "amd|radeon"
+    $hasIntel  = $joined -match "intel|uhd|iris"
+
+    if ($hasNvidia -and (Test-CommandExists "nvidia-smi")) {
+        return "cuda"
+    }
+
+    if ($hasAmd -or $hasIntel -or $hasNvidia) {
+        return "directml"
+    }
+
+    return "cpu"
+}
+
+function Test-VulkanRuntime {
+    $paths = @(
+        "$env:WINDIR\System32\vulkan-1.dll",
+        "$env:WINDIR\SysWOW64\vulkan-1.dll"
+    )
+    foreach ($p in $paths) {
+        if (Test-Path -LiteralPath $p) { return $true }
+    }
+    return $false
+}
+
+function Write-DetectedHardwareInfo {
+    $gpus = Get-VideoControllers
+    Write-Host ""
+    Write-Host "Detected GPUs:" -ForegroundColor Cyan
+    if (-not $gpus -or $gpus.Count -eq 0) {
+        Write-Host "  (none found via WMI)" -ForegroundColor Yellow
+    } else {
+        foreach ($g in $gpus) {
+            $n = $g.Name
+            $ram = $g.AdapterRAM
+            $ramGb = $null
+            if ($ram -and $ram -gt 0) { $ramGb = [Math]::Round(($ram / 1GB), 1) }
+            if ($ramGb) {
+                Write-Host ("  - {0} ({1} GB VRAM reported)" -f $n, $ramGb)
+            } else {
+                Write-Host ("  - {0}" -f $n)
+            }
+        }
+    }
+
+    $vk = Test-VulkanRuntime
+    Write-Host ("Vulkan runtime detected: {0}" -f ($(if ($vk) { "yes" } else { "no" }))) -ForegroundColor Cyan
+}
+
+function Install-TorchForBackend {
+    param(
+        [Parameter(Mandatory=$true)][string]$PipPath,
+        [Parameter(Mandatory=$true)][ValidateSet("cuda","directml","cpu")][string]$Backend
+    )
+
+    if ($Backend -eq "cuda") {
+        & $PipPath install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+        return
+    }
+
+    if ($Backend -eq "directml") {
+        & $PipPath install --upgrade torch-directml
+        return
+    }
+
+    & $PipPath install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+}
+
+function Test-BackendInPython {
+    param(
+        [Parameter(Mandatory=$true)][string]$PythonPath,
+        [Parameter(Mandatory=$true)][ValidateSet("cuda","directml","cpu")][string]$Backend
+    )
+
+    $code = @"
+import sys
+import importlib.util
+backend = sys.argv[1]
+
+if backend == "cuda":
+    import torch
+    ok = torch.cuda.is_available()
+    print("torch.cuda.is_available() =", ok)
+    sys.exit(0 if ok else 2)
+
+if backend == "directml":
+    if importlib.util.find_spec("torch_directml") is None:
+        print("DirectML not installed")
+        sys.exit(2)
+    import torch_directml
+    d = torch_directml.device()
+    print("torch_directml.device() =", d)
+    sys.exit(0)
+
+print("CPU backend selected")
+sys.exit(0)
+"@
+
+    $tmp = Join-Path -Path $env:TEMP -ChildPath ("rwe_backend_test_{0}.py" -f ([Guid]::NewGuid().ToString("N")))
+    Set-Content -LiteralPath $tmp -Value $code -Encoding UTF8
+
+    & $PythonPath $tmp $Backend
+    $exit = $LASTEXITCODE
+
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue | Out-Null
+    return $exit
+}
+
 function Download-File {
     param([Parameter(Mandatory=$true)][string]$Url,[Parameter(Mandatory=$true)][string]$OutFile)
     Ensure-Tls12
@@ -214,9 +342,6 @@ function Install-Pip-Packages {
     Write-Host "Upgrading pip tooling..."
     & $PipPath install --upgrade pip wheel setuptools
 
-    Write-Host "Installing PyTorch CPU wheels..." -ForegroundColor Yellow
-    & $PipPath install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-
     Write-Host "Installing pinned diffusers stack..."
     & $PipPath install `
         "diffusers==0.30.3" `
@@ -365,6 +490,7 @@ import math
 import random
 import subprocess
 import sys
+import importlib.util
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -508,6 +634,33 @@ def show_image_fullscreen(path: str) -> None:
     except Exception:
         IMAGE_VIEWER_PROC = None
 
+def _get_directml_device() -> Optional[Any]:
+    if importlib.util.find_spec("torch_directml") is None:
+        return None
+    import torch_directml
+    return torch_directml.device()
+
+def resolve_backend() -> Tuple[str, Any]:
+    pref = os.environ.get("RWE_BACKEND", "auto").strip().lower()
+
+    if pref == "cuda":
+        return "cuda", "cuda"
+    if pref == "cpu":
+        return "cpu", "cpu"
+    if pref == "directml":
+        dml = _get_directml_device()
+        if dml is not None:
+            return "directml", dml
+        return "cpu", "cpu"
+
+    if torch.cuda.is_available():
+        return "cuda", "cuda"
+
+    dml = _get_directml_device()
+    if dml is not None:
+        return "directml", dml
+    return "cpu", "cpu"
+
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
     na = np.linalg.norm(a) + 1e-9
     nb = np.linalg.norm(b) + 1e-9
@@ -585,8 +738,8 @@ class RWEv04:
         ensure_dir(out_dir)
         ensure_dir(self.emb_dir)
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
+        self.device_backend, self.device = resolve_backend()
+        self.dtype = torch.float16 if self.device_backend == "cuda" else torch.float32
 
         self.world = self._load_state()
 
@@ -691,7 +844,7 @@ class RWEv04:
 
     @torch.inference_mode()
     def _generate_image(self, prompt: str, seed: int) -> Image.Image:
-        gen = torch.Generator(device=self.device).manual_seed(seed) if self.device == "cuda" else None
+        gen = torch.Generator(device=self.device).manual_seed(seed) if self.device_backend == "cuda" else None
         if self.backend == "sdxl":
             r = self.pipe(
                 prompt=prompt,
@@ -1050,7 +1203,8 @@ def main() -> None:
 
     print("")
     print("RWE v0.4 loop starting (config-driven)")
-    print(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    backend_pref = os.environ.get("RWE_BACKEND", "auto").strip().lower() or "auto"
+    print(f"Backend preference: {backend_pref}")
     print(f"Output: {out_dir}")
     cfg_path = os.environ.get("RWE_CONFIG", "").strip()
     if cfg_path:
@@ -1058,6 +1212,7 @@ def main() -> None:
     print("")
 
     rwe = RWEv04(out_dir=out_dir)
+    print(f"Device: {rwe.device_backend}")
     for _ in range(iters):
         rwe.step()
 
@@ -1146,6 +1301,31 @@ try {
     $pip = $venvInfo.Pip
 
     Write-Section "Install packages"
+    Write-DetectedHardwareInfo
+    $backend = Get-PreferredBackend
+    Write-Host ("Selected backend (pre-check): {0}" -f $backend) -ForegroundColor Cyan
+
+    Install-TorchForBackend -PipPath $pip -Backend $backend
+
+    $verify = Test-BackendInPython -PythonPath $py -Backend $backend
+    if ($verify -ne 0) {
+        if ($backend -eq "cuda") {
+            Write-Host "CUDA verify failed. Falling back to DirectML..." -ForegroundColor Yellow
+            $backend = "directml"
+            Install-TorchForBackend -PipPath $pip -Backend $backend
+            $verify = Test-BackendInPython -PythonPath $py -Backend $backend
+        }
+        if ($verify -ne 0) {
+            Write-Host "DirectML verify failed. Falling back to CPU..." -ForegroundColor Yellow
+            $backend = "cpu"
+            Install-TorchForBackend -PipPath $pip -Backend $backend
+            $verify = Test-BackendInPython -PythonPath $py -Backend $backend
+        }
+    }
+
+    Write-Host ("Selected backend (verified): {0}" -f $backend) -ForegroundColor Green
+    $env:RWE_BACKEND = $backend
+
     Install-Pip-Packages -PipPath $pip
 
     Write-Section "Write RWE Python"
@@ -1173,6 +1353,7 @@ try {
     if (Test-Path Env:\RWE_CONFIG) { Remove-Item Env:\RWE_CONFIG -ErrorAction SilentlyContinue }
     if (Test-Path Env:\RWE_OUT) { Remove-Item Env:\RWE_OUT -ErrorAction SilentlyContinue }
     if (Test-Path Env:\RWE_ITERS) { Remove-Item Env:\RWE_ITERS -ErrorAction SilentlyContinue }
+    if (Test-Path Env:\RWE_BACKEND) { Remove-Item Env:\RWE_BACKEND -ErrorAction SilentlyContinue }
 
     $pdfPath = Join-Path (Join-Path $outDir "atlas") "rwe_atlas_v04.pdf"
 
