@@ -1,5 +1,4 @@
-# RWE v0.4 (config-driven runner)
-
+# RealWorldEngine-Windows - RWE v0.4  
 [Deutsch](#deutsch) | [English](#english) | [Lizenzen](#lizenzen)
 
 ## English
