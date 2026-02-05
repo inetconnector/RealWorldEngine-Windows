@@ -318,9 +318,6 @@ function Ensure-Venv310 {
     if (-not (Test-Path -LiteralPath $VenvPath)) {
         Write-Host ("Creating venv with Python 3.10: {0}" -f $VenvPath)
         $homeFallback = $env:USERPROFILE
-        if (-not [string]::IsNullOrWhiteSpace($homeFallback)) {
-            try { Set-Item -Path Env:HOME -Value $homeFallback -ErrorAction SilentlyContinue } catch { }
-        }
 
         $venvCreated = $false
         try {
