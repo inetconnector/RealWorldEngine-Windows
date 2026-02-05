@@ -1,97 +1,113 @@
-# RWE v0.4 (config-driven runner)
+# RealWorldEngine (Windows Runner)
 
-This repository contains a **Windows PowerShell 5.1** runner that bootstraps a Python 3.10 virtual environment, auto-detects the best PyTorch backend (CUDA / DirectML / CPU), writes a self-contained `rwe_v04.py`, runs the generation loop, produces an **atlas PDF**, and opens it automatically.
+Ein kompakter **Windows‑PowerShell‑Runner (PowerShell 5.1)**, der eine Python‑3.10‑Umgebung aufsetzt, einen passenden PyTorch‑Backend (CUDA/DirectML/CPU) ermittelt und anschließend eine konfigurierbare Bild‑Serie generiert. Die Ergebnisse landen in einem Run‑Ordner inklusive **PNG‑Outputs**, **State/Log‑Dateien** und einem automatisch geöffneten **Atlas‑PDF**.
 
-The behavior of the series (seed motifs, stopwords, anti-hallway filters, style rotation, novelty injection, escape motifs) is configured via a single JSON file: **`rwe_config.json`**.
+Die gesamte Steuerung der Serie passiert über eine einzige JSON‑Datei: **`rwe_config.json`**.
 
-## What you get
+## Was ist das hier?
 
-- A repeatable **run folder** created next to the script:
-  - `YYYY-MM-DD\run-YYYYMMDD-HHMMSS\...`
-- Automatic **backup** of existing config/script files into `bak\YYYYMMDD-HHMMSS\...`
-- **Config validation** with clear errors if required fields are missing
-- **Resume mode**: continue an existing run using its existing `world_state.json` / `world_log.jsonl`
-- **Backend auto-detection** (CUDA → DirectML → CPU) with verification + fallback
-- Outputs:
-  - PNG images for each iteration
-  - embeddings `.npy`
-  - `world_state.json`, `world_log.jsonl`
-  - `clusters.json`
-  - `outputs\atlas\rwe_atlas_v04.pdf` (opened automatically)
+**RealWorldEngine** ist ein prototypischer Runner für lange Bildserien. Er kombiniert:
 
-## Quick start (Windows)
+- einen **zustandsbasierten Generations‑Loop** (mit `world_state.json`/`world_log.jsonl`),
+- **Motif‑ und Style‑Steuerung** (Startmotive, Stopwords, Stilrotation),
+- **Exploration/Anti‑Monotonie‑Mechanismen** (Novelty‑ und Escape‑Motive),
+- eine **einheitliche Ergebnisstruktur** pro Run.
 
-1. Place these files in a folder:
+Kurz: Du definierst das „Vokabular“ der Serie in der Config, startest den Runner – und bekommst eine lange, nachvollziehbare Bild‑Abfolge mit klarer Struktur und Logs.
+
+## Wie funktioniert es? (Kurzfassung)
+
+1. **PowerShell‑Runner** startet, richtet venv ein und prüft/installiert benötigte Python‑Pakete.
+2. Der Runner **erkennt das beste Backend** (CUDA → DirectML → CPU) und übergibt es an Python.
+3. Ein **eingebettetes Python‑Script** erzeugt die Serie Iteration für Iteration, schreibt Logs/State und baut am Ende den **Atlas‑PDF**.
+
+## Quick Start (Windows)
+
+1. Lege diese Dateien in einen Ordner:
    - `rwe_runner.ps1`
    - `rwe_config.json`
-2. Right-click **PowerShell** → “Run as Administrator” (or just run the script; it self-elevates).
-3. Run:
+2. PowerShell öffnen (Administrator empfohlen, funktioniert meist auch ohne).
+3. Starten:
    ```powershell
    .\rwe_runner.ps1
    ```
-4. Choose:
-   - iterations (default from config)
-   - Hugging Face token (optional; needed for gated models like SDXL base on Hugging Face)
+4. Optional wirst du nach **Iterationszahl** und **Hugging‑Face‑Token** gefragt (für gated Modelle wie SDXL).
 
-When finished, the script opens the generated PDF.
+Wenn der Run fertig ist, wird der **Atlas‑PDF** automatisch geöffnet.
 
-## Config format
+## Ergebnisstruktur
 
-The config file stores both **values** and **explanations** in JSON.
+Für jeden Lauf wird ein Run‑Ordner neben dem Script erstellt:
 
-Each main section is an object with:
+```
+YYYY-MM-DD\run-YYYYMMDD-HHMMSS\...
+```
 
-- `description`: what it is
-- `effects`: how it affects images/series
-- `values`: the actual data used by the generator
+Darin findest du u. a.:
+
+- PNGs pro Iteration
+- `world_state.json`, `world_log.jsonl`
+- `clusters.json`
+- `outputs\atlas\rwe_atlas_v04.pdf`
+- gespeicherte Embeddings (`.npy`)
+
+## Konfiguration (`rwe_config.json`)
+
+Die Config enthält **Werte + Erklärungen**. Jede Hauptsektion besitzt:
+
+- `description`: was es ist
+- `effects`: wie es die Serie beeinflusst
+- `values`: die eigentlichen Daten
+
+Wichtige Bereiche:
 
 ### `initial_words.values`
-Seed motifs for the first prompts. These influence early images and bias the long series because the motif bank grows from caption keywords.
+Start‑Motive für die ersten Prompts. Diese prägen frühe Bilder und beeinflussen langfristig die Motif‑Bank.
 
 ### `banned_motifs.values`
-Hard blacklist of keywords that should never enter the motif bank. This is the anti-hallway / anti-interior filter.
+Harter Ausschluss bestimmter Begriffe (z. B. Anti‑Hallway/Anti‑Interior).
 
 ### `stopwords.values`
-Filtered keywords during caption tokenization. Keeps learned motifs meaningful and removes grammar + generic image words.
+Filtert Wörter aus Captions, damit nur semantisch relevante Motive gelernt werden.
 
 ### `style_pool.values`
-Style clauses appended to prompts. The loop occasionally rotates styles to avoid getting stuck in a local aesthetic minimum.
+Stil‑Zusätze, die gelegentlich rotiert werden, um das Bild‑„lokale Minimum“ zu verlassen.
 
 ### `novelty_motif_pool.values`
-Injected motifs when novelty drops (images become too similar). Forces exploration.
+Motive, die bei sinkender Vielfalt injiziert werden, um neue Themen zu erzwingen.
 
 ### `escape_motifs.values`
-Injected when the loop detects repeated interior cues (“interior trap”). Pushes composition outdoors and open.
+Notfall‑Motive, wenn der Loop in Innenräumen „festhängt“.
 
 ### `runtime_defaults.values.iterations`
-Default iteration count used as prompt default.
+Standard‑Iterationsanzahl, die beim Start angeboten wird.
 
-## Resume mode
+## Resume‑Modus
 
-On startup, you can choose resume mode:
+Beim Start kannst du **Resume** wählen:
 
-- If you resume, you select a run folder (default is the latest run folder found).
-- The script continues using that folder’s existing state/logs.
-- The existing `rwe_config.json` inside the run folder is kept as the active config for that run.
+- Wähle einen bestehenden Run‑Ordner (Standard: letzter Run).
+- Der Runner setzt dort mit den vorhandenen State/Log‑Dateien fort.
+- Die im Run‑Ordner gespeicherte Config bleibt verbindlich.
 
-## Backend selection
+## Backend‑Auswahl
 
-On startup, the runner detects the GPU(s), verifies CUDA availability, and selects the best backend:
+Der Runner testet verfügbare Backends in dieser Reihenfolge:
 
-1. **CUDA** if an NVIDIA GPU and `nvidia-smi` are available (then verified in Python).
-2. **DirectML** for AMD/Intel (or NVIDIA without CUDA), then verified in Python.
-3. **CPU** fallback if the GPU backends fail verification.
+1. **CUDA** (NVIDIA + `nvidia-smi`), danach Verifikation im Python‑Code
+2. **DirectML** (AMD/Intel oder NVIDIA ohne CUDA), danach Verifikation
+3. **CPU** als Fallback
 
-The verified backend is exposed to Python via `RWE_BACKEND` and used by the embedded runner.
+Das bestätigte Backend wird über `RWE_BACKEND` an Python übergeben.
 
-## Notes
+## Hinweise
 
-- Default backend preference is SDXL; if SDXL load fails, it falls back to SD 1.5.
-- CPU-only is supported but will be slow.
-- This is a research/prototyping runner. Expect to customize models, GPU settings, and prompt logic over time.
+- Standard‑Backend‑Priorität ist **SDXL**, mit Fallback auf **SD 1.5**, falls SDXL fehlschlägt.
+- CPU‑Only funktioniert, ist aber sehr langsam.
+- Das Projekt ist ein **Research/Prototype‑Runner** – Anpassungen an Modelle, Prompts und GPU‑Settings sind ausdrücklich vorgesehen.
 
-## Files
+## Dateien
 
-- `rwe_runner.ps1` – complete runner/installer (PowerShell 5.1 compatible)
-- `rwe_config.json` – config + explanations
-- `LICENSE` – Unlicense (public domain dedication, where permitted)
+- `rwe_runner.ps1` – Runner/Installer (PowerShell 5.1 kompatibel)
+- `rwe_config.json` – Konfiguration + Erklärungen
+- `LICENSE` – Unlicense (Public Domain, wo möglich)
