@@ -317,7 +317,29 @@ function Ensure-Venv310 {
 
     if (-not (Test-Path -LiteralPath $VenvPath)) {
         Write-Host ("Creating venv with Python 3.10: {0}" -f $VenvPath)
-        & $pyLauncher -3.10 -m venv $VenvPath
+        $homeFallback = $env:USERPROFILE
+        if (-not [string]::IsNullOrWhiteSpace($homeFallback)) {
+            try { Set-Item -Path Env:HOME -Value $homeFallback -ErrorAction SilentlyContinue } catch { }
+        }
+
+        $venvCreated = $false
+        try {
+            & $pyLauncher -3.10 -m venv $VenvPath
+            if ($LASTEXITCODE -eq 0) { $venvCreated = $true }
+        } catch {
+            $venvCreated = $false
+        }
+
+        if (-not $venvCreated -and -not [string]::IsNullOrWhiteSpace($homeFallback)) {
+            Write-Host "Venv creation failed in PowerShell. Retrying via cmd.exe to avoid HOME variable errors..." -ForegroundColor Yellow
+            $cmd = "set HOME=$homeFallback && `"$pyLauncher`" -3.10 -m venv `"$VenvPath`""
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $cmd) -Wait -NoNewWindow -PassThru
+            if ($proc.ExitCode -ne 0) {
+                throw ("Venv creation failed in cmd.exe as well (ExitCode={0})." -f $proc.ExitCode)
+            }
+        } elseif (-not $venvCreated) {
+            throw "Venv creation failed and HOME fallback is unavailable."
+        }
     } else {
         Write-Host ("Venv exists: {0}" -f $VenvPath) -ForegroundColor Green
     }
@@ -497,6 +519,8 @@ import subprocess
 import sys
 import importlib.util
 import textwrap
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -564,6 +588,23 @@ ESCAPE_MOTIFS = _as_list(CFG.get("escape_motifs", [])) or [
 INITIAL_WORDS = _as_list(CFG.get("initial_words", [])) or [
     "mirror", "archive", "threshold", "glyph", "loop", "shadow"
 ]
+
+def _get_genesis_config(cfg: Dict[str, Any]) -> Tuple[str, int]:
+    sec = cfg.get("genesis_image", {})
+    if not isinstance(sec, dict):
+        return "", 12
+    values = sec.get("values", {}) if isinstance(sec.get("values", {}), dict) else {}
+    url = str(values.get("url", "") or "").strip()
+    kw_raw = values.get("analysis_keywords", 12)
+    try:
+        kw = int(kw_raw)
+    except (TypeError, ValueError):
+        kw = 12
+    if kw < 1:
+        kw = 12
+    return url, kw
+
+GENESIS_URL, GENESIS_KEYWORDS = _get_genesis_config(CFG)
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
@@ -805,13 +846,16 @@ class IterationRecord:
     backend: str
 
 class RWEv04:
-    def __init__(self, out_dir: str):
+    def __init__(self, out_dir: str, genesis_url: str = "", genesis_keywords: int = 12):
         self.out_dir = out_dir
         self.state_path = os.path.join(out_dir, "world_state.json")
         self.log_path = os.path.join(out_dir, "world_log.jsonl")
         self.emb_dir = os.path.join(out_dir, "embeddings")
         ensure_dir(out_dir)
         ensure_dir(self.emb_dir)
+
+        self.genesis_url = genesis_url.strip()
+        self.genesis_keywords = max(1, int(genesis_keywords))
 
         self.device_backend, self.device = resolve_backend()
         self.dtype = torch.float16 if self.device_backend == "cuda" else torch.float32
@@ -822,6 +866,8 @@ class RWEv04:
         self.blip_processor, self.blip = self._load_blip()
         self.clip_processor, self.clip = self._load_clip()
         self.prev_embed: Optional[np.ndarray] = None
+
+        self._bootstrap_genesis()
 
     def _load_state(self) -> WorldState:
         if os.path.exists(self.state_path):
@@ -954,6 +1000,139 @@ class RWEv04:
         v = feats[0].detach().float().cpu().numpy()
         v = v / (np.linalg.norm(v) + 1e-9)
         return v
+
+    def _update_motifs_from_keywords(self, keywords: List[str]) -> List[str]:
+        added: List[str] = []
+        for k in keywords:
+            if k in BANNED_MOTIFS:
+                continue
+            if k not in self.world.motif_bank:
+                self.world.motif_bank.append(k)
+                added.append(k)
+        self.world.motif_bank = self.world.motif_bank[-64:]
+        return added
+
+    def _download_genesis(self, url: str) -> Optional[str]:
+        if not url:
+            return None
+        out_path = os.path.join(self.out_dir, "genesis_source.png")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "RWE/0.4"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            with open(out_path, "wb") as f:
+                f.write(data)
+            return out_path
+        except Exception as exc:
+            print(f"Genesis download failed: {exc}")
+            return None
+
+    def _dominant_colors(self, img: Image.Image, k: int = 5) -> List[Dict[str, Any]]:
+        arr = np.array(img.convert("RGB").resize((128, 128)))
+        flat = arr.reshape(-1, 3).astype(np.float32)
+        if flat.shape[0] > 8000:
+            idx = np.random.choice(flat.shape[0], size=8000, replace=False)
+            flat = flat[idx]
+        k = max(1, min(k, flat.shape[0]))
+        if k == 1:
+            mean = flat.mean(axis=0).astype(int)
+            hexv = "#{:02x}{:02x}{:02x}".format(int(mean[0]), int(mean[1]), int(mean[2]))
+            return [{"rgb": [int(mean[0]), int(mean[1]), int(mean[2])], "hex": hexv, "count": int(flat.shape[0])}]
+        km = KMeans(n_clusters=k, n_init=5, random_state=42)
+        labels = km.fit_predict(flat)
+        counts = np.bincount(labels)
+        centers = km.cluster_centers_.astype(int)
+        order = np.argsort(-counts)
+        palette: List[Dict[str, Any]] = []
+        for i in order:
+            rgb = centers[i]
+            hexv = "#{:02x}{:02x}{:02x}".format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+            palette.append({"rgb": [int(rgb[0]), int(rgb[1]), int(rgb[2])], "hex": hexv, "count": int(counts[i])})
+        return palette
+
+    def _analyze_genesis(self, img: Image.Image, caption: str, keywords: List[str], img_path: str) -> Dict[str, Any]:
+        arr = np.array(img.convert("RGB"))
+        h, w = arr.shape[:2]
+        luma = 0.2126 * arr[..., 0] + 0.7152 * arr[..., 1] + 0.0722 * arr[..., 2]
+        brightness = float(luma.mean() / 255.0)
+        contrast = float(luma.std() / 255.0)
+        mean_color = [float(x) for x in arr.mean(axis=(0, 1))]
+        palette = self._dominant_colors(img, k=5)
+        return {
+            "source_url": self.genesis_url,
+            "local_path": img_path,
+            "size": {"width": int(w), "height": int(h)},
+            "aspect_ratio": float(w / max(1, h)),
+            "caption": caption,
+            "keywords": keywords,
+            "mean_color": mean_color,
+            "brightness": brightness,
+            "contrast": contrast,
+            "dominant_colors": palette,
+        }
+
+    def _bootstrap_genesis(self) -> None:
+        if not self.genesis_url:
+            return
+        if self.world.iteration > 0:
+            return
+        if os.path.exists(self.log_path) and os.path.getsize(self.log_path) > 0:
+            return
+
+        print(f"Genesis: loading {self.genesis_url}")
+        img_path = self._download_genesis(self.genesis_url)
+        if not img_path:
+            print("Genesis: download failed, continuing without genesis.")
+            return
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as exc:
+            print(f"Genesis: failed to open image: {exc}")
+            return
+
+        cap = self._caption_image(img)
+        emb = self._embed_image(img)
+        keywords = tokenize_keywords(cap, max_words=self.genesis_keywords)
+        motifs_added = self._update_motifs_from_keywords(keywords)
+
+        emb_path = os.path.join(self.emb_dir, "genesis.npy")
+        np.save(emb_path, emb.astype(np.float32))
+
+        analysis = self._analyze_genesis(img, cap, keywords, img_path)
+        analysis_path = os.path.join(self.out_dir, "genesis_analysis.json")
+        with open(analysis_path, "w", encoding="utf-8") as f:
+            json.dump(analysis, f, ensure_ascii=False, indent=2)
+
+        rec = IterationRecord(
+            iteration=0,
+            ts=int(time.time()),
+            prompt=f"GENESIS_URL: {self.genesis_url}",
+            negative=self.world.negative,
+            width=int(img.width),
+            height=int(img.height),
+            steps=0,
+            cfg=0.0,
+            seed=-1,
+            image_path=img_path,
+            caption=cap,
+            motifs_added=motifs_added,
+            similarity_prev=None,
+            novelty_prev=None,
+            rule_change="genesis_bootstrap",
+            embedding_path=emb_path,
+            interior_strikes=int(self.world.interior_strikes),
+            backend="genesis",
+        )
+        self._append_log(rec)
+        self._save_state()
+        self.prev_embed = emb
+
+        print("Genesis analysis:")
+        print(f"    caption: {cap}")
+        print(f"    keywords: {', '.join(keywords) if keywords else '(none)'}")
+        print(f"    brightness: {analysis['brightness']:.3f} | contrast: {analysis['contrast']:.3f}")
+        print(f"    dominant_colors: {[c['hex'] for c in analysis['dominant_colors']]}")
+        print(f"    analysis saved: {analysis_path}")
 
     def _update_motifs_from_caption(self, caption: str) -> List[str]:
         kws = tokenize_keywords(caption, max_words=10)
@@ -1378,7 +1557,7 @@ def main() -> None:
         print(f"Config: {cfg_path}")
     print("")
 
-    rwe = RWEv04(out_dir=out_dir)
+    rwe = RWEv04(out_dir=out_dir, genesis_url=GENESIS_URL, genesis_keywords=GENESIS_KEYWORDS)
     print(f"Device: {rwe.device_backend}")
     for _ in range(iters):
         rwe.step()
@@ -1555,6 +1734,33 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     interval_entry = ttk.Entry(slideshow_row, textvariable=interval_var, width=10)
     interval_entry.pack(side=tk.LEFT, padx=(8, 0))
 
+    genesis_frame = ttk.Frame(notebook, padding=12)
+    notebook.add(genesis_frame, text="Genesis")
+
+    genesis_hint = describe_section(cfg if cfg else default_cfg, "genesis_image")
+    genesis_label = ttk.Label(genesis_frame, text=genesis_hint, wraplength=820, justify=tk.LEFT)
+    genesis_label.pack(anchor=tk.W, pady=(0, 8))
+
+    genesis_row = ttk.Frame(genesis_frame)
+    genesis_row.pack(anchor=tk.W, pady=(4, 8), fill=tk.X)
+
+    genesis_url_label = ttk.Label(genesis_row, text="Genesis-Bild URL:")
+    genesis_url_label.pack(side=tk.LEFT)
+
+    genesis_url_var = tk.StringVar()
+    genesis_url_entry = ttk.Entry(genesis_row, textvariable=genesis_url_var, width=60)
+    genesis_url_entry.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
+
+    genesis_kw_row = ttk.Frame(genesis_frame)
+    genesis_kw_row.pack(anchor=tk.W, pady=(4, 8))
+
+    genesis_kw_label = ttk.Label(genesis_kw_row, text="Max. Analyse-Keywords:")
+    genesis_kw_label.pack(side=tk.LEFT)
+
+    genesis_kw_var = tk.StringVar()
+    genesis_kw_entry = ttk.Entry(genesis_kw_row, textvariable=genesis_kw_var, width=10)
+    genesis_kw_entry.pack(side=tk.LEFT, padx=(8, 0))
+
     def load_into_fields(source_cfg: dict) -> None:
         for key, _ in LIST_SECTIONS:
             sec = ensure_section(source_cfg, key)
@@ -1571,6 +1777,13 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
         slideshow_values = slideshow_sec.get("values", {}) if isinstance(slideshow_sec, dict) else {}
         interval_val = slideshow_values.get("interval_seconds", 5)
         interval_var.set(str(interval_val))
+
+        genesis_sec = source_cfg.get("genesis_image", {})
+        genesis_values = genesis_sec.get("values", {}) if isinstance(genesis_sec, dict) else {}
+        genesis_url = genesis_values.get("url", "")
+        genesis_kw = genesis_values.get("analysis_keywords", 12)
+        genesis_url_var.set("" if genesis_url is None else str(genesis_url))
+        genesis_kw_var.set(str(genesis_kw))
 
     def handle_open_outputs() -> None:
         if not outputs_dir:
@@ -1631,6 +1844,24 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
             messagebox.showerror("Fehler", "Die Umschaltzeit muss größer als 0 sein.")
             return
         slideshow_values["interval_seconds"] = interval_val
+
+        genesis_sec = updated.setdefault("genesis_image", {})
+        if not isinstance(genesis_sec, dict):
+            genesis_sec = {}
+            updated["genesis_image"] = genesis_sec
+        genesis_values = genesis_sec.setdefault("values", {})
+        if not isinstance(genesis_values, dict):
+            genesis_values = {}
+            genesis_sec["values"] = genesis_values
+
+        genesis_values["url"] = genesis_url_var.get().strip()
+
+        genesis_kw_text = genesis_kw_var.get().strip()
+        if genesis_kw_text:
+            if not genesis_kw_text.isdigit() or int(genesis_kw_text) < 1:
+                messagebox.showerror("Fehler", "Bitte eine gültige positive Zahl für Analyse-Keywords eingeben.")
+                return
+            genesis_values["analysis_keywords"] = int(genesis_kw_text)
 
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(updated, f, ensure_ascii=False, indent=2)
