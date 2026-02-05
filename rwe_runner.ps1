@@ -479,6 +479,7 @@ import random
 import subprocess
 import sys
 import importlib.util
+import textwrap
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -667,6 +668,75 @@ def tokenize_keywords(text: str, max_words: int = 12) -> List[str]:
         if len(out) >= max_words:
             break
     return out
+
+def detect_epochs(items: List[Dict[str, Any]], sustain: int = 3, novelty_spike: float = 0.40) -> List[Dict[str, Any]]:
+    items = sorted(items, key=lambda x: x["iteration"])
+    n = len(items)
+    if n == 0:
+        return []
+
+    clusters = [int(x["cluster"]) for x in items]
+    novelty = []
+    for x in items:
+        v = x.get("novelty_prev", None)
+        novelty.append(float(v) if v is not None else 0.0)
+
+    boundaries = [0]
+
+    def stable_switch(i: int) -> bool:
+        cur = clusters[i]
+        nxt = clusters[i + 1]
+        if cur == nxt:
+            return False
+        end = min(n, i + 1 + sustain)
+        return all(clusters[j] == nxt for j in range(i + 1, end))
+
+    for i in range(0, n - 1):
+        if stable_switch(i):
+            boundaries.append(i + 1)
+            continue
+        if novelty[i + 1] >= novelty_spike:
+            boundaries.append(i + 1)
+
+    boundaries = sorted(set(boundaries))
+    epochs: List[Dict[str, Any]] = []
+    for ei, start in enumerate(boundaries):
+        end = (boundaries[ei + 1] - 1) if (ei + 1) < len(boundaries) else (n - 1)
+        seg = items[start:end + 1]
+        it0 = int(seg[0]["iteration"])
+        it1 = int(seg[-1]["iteration"])
+
+        nov = [float(x.get("novelty_prev", 0.0) or 0.0) for x in seg]
+        avg_nov = float(sum(nov) / max(1, len(nov)))
+
+        cl_counts: Dict[int, int] = {}
+        for x in seg:
+            c = int(x["cluster"])
+            cl_counts[c] = cl_counts.get(c, 0) + 1
+        top_clusters = sorted(cl_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+        epochs.append({
+            "epoch_id": ei + 1,
+            "start_index": start,
+            "end_index": end,
+            "iteration_start": it0,
+            "iteration_end": it1,
+            "size": len(seg),
+            "avg_novelty": avg_nov,
+            "top_clusters": top_clusters,
+            "items": seg,
+        })
+    return epochs
+
+def motif_counts_from_captions(captions: List[str], topn: int = 15) -> List[Tuple[str, int]]:
+    counts: Dict[str, int] = {}
+    for cap in captions:
+        for t in tokenize_keywords(cap, max_words=40):
+            counts[t] = counts.get(t, 0) + 1
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:topn]
+
+def wrap_lines(text: str, max_len: int) -> List[str]:
+    return textwrap.wrap(text, width=max_len, break_long_words=False, break_on_hyphens=False)
 
 def likely_interior(caption: str) -> bool:
     c = caption.lower()
@@ -1135,7 +1205,7 @@ def make_contact_sheet(image_paths: List[str], out_path: str, title: str, thumb:
 
     sheet.save(out_path)
 
-def build_pdf(out_dir: str, clusters: Dict[str, Any]) -> str:
+def build_pdf(out_dir: str, clusters: Dict[str, Any], epochs: List[Dict[str, Any]]) -> str:
     items = clusters["items"]
     items = sorted(items, key=lambda x: x["iteration"])
 
@@ -1149,18 +1219,81 @@ def build_pdf(out_dir: str, clusters: Dict[str, Any]) -> str:
     timeline_sheet = os.path.join(sheets_dir, "timeline.png")
     make_contact_sheet(timeline_imgs, timeline_sheet, "RWE Atlas - Timeline (sampled)", thumb=320, cols=3)
 
+    by_cluster: Dict[int, List[Dict[str, Any]]] = {}
+    for it in items:
+        by_cluster.setdefault(int(it["cluster"]), []).append(it)
+
+    cluster_sheets: List[Tuple[str, str]] = []
+    for cl in sorted(by_cluster.keys()):
+        img_paths = [x["image_path"] for x in by_cluster[cl][:12]]
+        p = os.path.join(sheets_dir, f"cluster_{cl:02d}.png")
+        make_contact_sheet(img_paths, p, f"Cluster {cl:02d} (top {len(img_paths)})", thumb=320, cols=3)
+        cluster_sheets.append((f"Cluster {cl:02d}", p))
+
+    epoch_sheets: List[Tuple[Dict[str, Any], str]] = []
+    for e in epochs:
+        img_paths = [x["image_path"] for x in e["items"][:12]]
+        p = os.path.join(sheets_dir, f"epoch_{e['epoch_id']:02d}.png")
+        make_contact_sheet(img_paths, p, f"Epoch {e['epoch_id']:02d} (top {len(img_paths)})", thumb=320, cols=3)
+        epoch_sheets.append((e, p))
+
+    cluster_motifs: Dict[int, List[Tuple[str, int]]] = {}
+    for cl, arr in by_cluster.items():
+        caps = [x["caption"] for x in arr]
+        cluster_motifs[cl] = motif_counts_from_captions(caps, topn=12)
+
+    epoch_motifs: Dict[int, List[Tuple[str, int]]] = {}
+    for e in epochs:
+        caps = [x["caption"] for x in e["items"]]
+        epoch_motifs[int(e["epoch_id"])] = motif_counts_from_captions(caps, topn=12)
+
     pdf_path = os.path.join(atlas_dir, "rwe_atlas_v04.pdf")
     c = canvas.Canvas(pdf_path, pagesize=A4)
     pw, ph = A4
     margin = 15 * mm
-    c.setFont("Helvetica-Bold", 20)
-    c.drawString(margin, ph - 30*mm, "RWE v0.4 (config-driven) - Atlas")
+
+    c.setFont("Helvetica-Bold", 22)
+    c.drawString(margin, ph - 30*mm, "Reflective World Engine (RWE) - Atlas v0.4")
     c.setFont("Helvetica", 12)
     c.drawString(margin, ph - 40*mm, f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     c.drawString(margin, ph - 48*mm, f"Output dir: {out_dir}")
     cfg_path = os.environ.get("RWE_CONFIG", "").strip()
     if cfg_path:
         c.drawString(margin, ph - 56*mm, f"Config: {cfg_path}")
+    c.drawString(margin, ph - 64*mm, f"Clustering: {clusters.get('method','')}, k={clusters.get('k','')}")
+    c.drawString(margin, ph - 72*mm, f"Epochs: {len(epochs)}")
+    c.showPage()
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(margin, ph - margin, "Motif Index - Epochs")
+    y = ph - margin - 18
+    c.setFont("Helvetica", 11)
+    for eid in sorted(epoch_motifs.keys()):
+        mot = epoch_motifs[eid]
+        line = f"Epoch {eid:02d}: " + ", ".join([f"{m}({n})" for m, n in mot])
+        for ln in wrap_lines(line, max_len=95):
+            c.drawString(margin, y, ln)
+            y -= 14
+            if y < 30*mm:
+                c.showPage()
+                c.setFont("Helvetica", 11)
+                y = ph - margin
+    c.showPage()
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(margin, ph - margin, "Motif Index - Clusters")
+    y = ph - margin - 18
+    c.setFont("Helvetica", 11)
+    for cl in sorted(cluster_motifs.keys()):
+        mot = cluster_motifs[cl]
+        line = f"Cluster {cl:02d}: " + ", ".join([f"{m}({n})" for m, n in mot])
+        for ln in wrap_lines(line, max_len=95):
+            c.drawString(margin, y, ln)
+            y -= 14
+            if y < 30*mm:
+                c.showPage()
+                c.setFont("Helvetica", 11)
+                y = ph - margin
     c.showPage()
 
     c.setFont("Helvetica-Bold", 14)
@@ -1169,6 +1302,35 @@ def build_pdf(out_dir: str, clusters: Dict[str, Any]) -> str:
     avail_h = ph - 2 * margin - 18
     c.drawImage(timeline_sheet, margin, margin, width=avail_w, height=avail_h, preserveAspectRatio=True, anchor="c")
     c.showPage()
+
+    for e, sheet_path in epoch_sheets:
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(margin, ph - margin, f"Epoch {e['epoch_id']:02d}: Iter {e['iteration_start']}-{e['iteration_end']} (n={e['size']})")
+        y = ph - margin - 22
+        c.setFont("Helvetica", 11)
+        tc = ", ".join([f"{cl}:{cnt}" for cl, cnt in e["top_clusters"]])
+        c.drawString(margin, y, f"Avg novelty: {e['avg_novelty']:.3f} | Top clusters: {tc}")
+        y -= 16
+
+        motifs = epoch_motifs[int(e["epoch_id"])]
+        motif_line = "Top motifs: " + ", ".join([f"{m}({n})" for m, n in motifs])
+        for ln in wrap_lines(motif_line, max_len=95):
+            c.drawString(margin, y, ln)
+            y -= 14
+
+        c.showPage()
+
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(margin, ph - margin, f"Epoch {e['epoch_id']:02d} contact sheet")
+        c.drawImage(sheet_path, margin, margin, width=avail_w, height=avail_h, preserveAspectRatio=True, anchor="c")
+        c.showPage()
+
+    for title, sp in cluster_sheets:
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(margin, ph - margin, f"{title} contact sheet")
+        c.drawImage(sp, margin, margin, width=avail_w, height=avail_h, preserveAspectRatio=True, anchor="c")
+        c.showPage()
+
     c.save()
     return pdf_path
 
@@ -1209,7 +1371,12 @@ def main() -> None:
     cluster_path = cluster_world(out_dir)
     with open(cluster_path, "r", encoding="utf-8") as f:
         clusters = json.load(f)
-    pdf = build_pdf(out_dir, clusters)
+    epochs = detect_epochs(clusters["items"], sustain=3, novelty_spike=0.40)
+    epochs_path = os.path.join(out_dir, "epochs.json")
+    with open(epochs_path, "w", encoding="utf-8") as f:
+        json.dump({"epochs": epochs}, f, ensure_ascii=False, indent=2)
+    pdf = build_pdf(out_dir, clusters, epochs)
+    print(f"Epochs JSON: {epochs_path}")
     print(f"Atlas PDF: {pdf}")
     print("")
     print("Done.")
