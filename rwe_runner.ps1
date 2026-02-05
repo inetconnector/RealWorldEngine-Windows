@@ -317,7 +317,22 @@ function Ensure-Venv310 {
 
     if (-not (Test-Path -LiteralPath $VenvPath)) {
         Write-Host ("Creating venv with Python 3.10: {0}" -f $VenvPath)
-        & $pyLauncher -3.10 -m venv $VenvPath
+        if ([string]::IsNullOrWhiteSpace($env:HOME) -and -not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+            try { $env:HOME = $env:USERPROFILE } catch { }
+        }
+        try {
+            & $pyLauncher -3.10 -m venv $VenvPath
+        } catch {
+            $homeFallback = $env:USERPROFILE
+            if (-not [string]::IsNullOrWhiteSpace($homeFallback)) {
+                Write-Host "Venv creation failed in PowerShell. Retrying via cmd.exe to avoid HOME variable errors..." -ForegroundColor Yellow
+                $cmd = "set HOME=$homeFallback && `"$pyLauncher`" -3.10 -m venv `"$VenvPath`""
+                & cmd.exe /c $cmd
+                if ($LASTEXITCODE -ne 0) { throw }
+            } else {
+                throw
+            }
+        }
     } else {
         Write-Host ("Venv exists: {0}" -f $VenvPath) -ForegroundColor Green
     }
