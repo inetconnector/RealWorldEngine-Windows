@@ -1942,7 +1942,7 @@ if (-not $py) {
 
 $slideshowPy = Join-Path $runRoot "rwe_slideshow.py"
 if (-not (Test-Path -LiteralPath $slideshowPy)) {
-@'
+@"
 import argparse
 import json
 import os
@@ -2035,7 +2035,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-'@ | Set-Content -LiteralPath $slideshowPy -Encoding UTF8
+"@ | Set-Content -LiteralPath $slideshowPy -Encoding UTF8
 }
 
 & $py $slideshowPy --run-root $runRoot
