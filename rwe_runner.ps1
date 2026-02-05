@@ -105,10 +105,11 @@ function Test-VulkanRuntime {
 }
 
 function Write-DetectedHardwareInfo {
-    $gpus = Get-VideoControllers
+    $gpus = @(Get-VideoControllers)
+
     Write-Host ""
     Write-Host "Detected GPUs:" -ForegroundColor Cyan
-    if (-not $gpus -or $gpus.Count -eq 0) {
+    if ($gpus.Count -eq 0) {
         Write-Host "  (none found via WMI)" -ForegroundColor Yellow
     } else {
         foreach ($g in $gpus) {
