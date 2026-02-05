@@ -196,6 +196,16 @@
       "ruins"
     ]
   },
+  "slideshow": {
+    "description": "Konfiguration für die Slideshow im Run-Ordner.",
+    "effects": [
+      "Legt die automatische Umschaltzeit der Bilder fest",
+      "Wird vom start_slideshow.ps1 im Run-Ordner gelesen"
+    ],
+    "values": {
+      "interval_seconds": 5
+    }
+  },
   "runtime_defaults": {
     "description": "Defaults used by the runner if you do not override interactively.",
     "effects": [
