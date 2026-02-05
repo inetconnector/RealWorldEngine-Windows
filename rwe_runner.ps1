@@ -432,6 +432,14 @@ function Validate-Config {
     if ($iters -lt 1 -or $iters -gt 100000) {
         throw "Config runtime_defaults.values.iterations must be between 1 and 100000."
     }
+
+    if ($cfg.slideshow -and $cfg.slideshow.values -and $cfg.slideshow.values.interval_seconds) {
+        $interval = $cfg.slideshow.values.interval_seconds
+        $parsed = 0.0
+        if (-not [double]::TryParse([string]$interval, [ref]$parsed) -or $parsed -le 0) {
+            throw "Config slideshow.values.interval_seconds must be a positive number."
+        }
+    }
 }
 
 function New-RunFolderNextToScript {
@@ -1530,6 +1538,23 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     iter_entry = ttk.Entry(runtime_row, textvariable=iter_var, width=10)
     iter_entry.pack(side=tk.LEFT, padx=(8, 0))
 
+    slideshow_frame = ttk.Frame(notebook, padding=12)
+    notebook.add(slideshow_frame, text="Slideshow")
+
+    slideshow_hint = describe_section(cfg if cfg else default_cfg, "slideshow")
+    slideshow_label = ttk.Label(slideshow_frame, text=slideshow_hint, wraplength=820, justify=tk.LEFT)
+    slideshow_label.pack(anchor=tk.W, pady=(0, 8))
+
+    slideshow_row = ttk.Frame(slideshow_frame)
+    slideshow_row.pack(anchor=tk.W, pady=(4, 8))
+
+    interval_label = ttk.Label(slideshow_row, text="Umschaltzeit (Sekunden):")
+    interval_label.pack(side=tk.LEFT)
+
+    interval_var = tk.StringVar()
+    interval_entry = ttk.Entry(slideshow_row, textvariable=interval_var, width=10)
+    interval_entry.pack(side=tk.LEFT, padx=(8, 0))
+
     def load_into_fields(source_cfg: dict) -> None:
         for key, _ in LIST_SECTIONS:
             sec = ensure_section(source_cfg, key)
@@ -1541,6 +1566,11 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
         values = runtime_sec.get("values", {}) if isinstance(runtime_sec, dict) else {}
         iter_val = values.get("iterations", 10)
         iter_var.set(str(iter_val))
+
+        slideshow_sec = source_cfg.get("slideshow", {})
+        slideshow_values = slideshow_sec.get("values", {}) if isinstance(slideshow_sec, dict) else {}
+        interval_val = slideshow_values.get("interval_seconds", 5)
+        interval_var.set(str(interval_val))
 
     def handle_open_outputs() -> None:
         if not outputs_dir:
@@ -1581,6 +1611,26 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
             messagebox.showerror("Fehler", "Bitte eine gültige positive Zahl für Iterationen eingeben.")
             return
         runtime_values["iterations"] = int(iter_text)
+
+        slideshow_sec = updated.setdefault("slideshow", {})
+        if not isinstance(slideshow_sec, dict):
+            slideshow_sec = {}
+            updated["slideshow"] = slideshow_sec
+        slideshow_values = slideshow_sec.setdefault("values", {})
+        if not isinstance(slideshow_values, dict):
+            slideshow_values = {}
+            slideshow_sec["values"] = slideshow_values
+
+        interval_text = interval_var.get().strip().replace(",", ".")
+        try:
+            interval_val = float(interval_text)
+        except ValueError:
+            messagebox.showerror("Fehler", "Bitte eine gültige Zahl für die Umschaltzeit eingeben.")
+            return
+        if interval_val <= 0:
+            messagebox.showerror("Fehler", "Die Umschaltzeit muss größer als 0 sein.")
+            return
+        slideshow_values["interval_seconds"] = interval_val
 
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(updated, f, ensure_ascii=False, indent=2)
@@ -1632,6 +1682,137 @@ if __name__ == "__main__":
     return $editorPy
 }
 
+function Write-RunSlideshowStarter {
+    param([string]$RunRoot)
+
+    $starterPath = Join-Path $RunRoot "start_slideshow.ps1"
+
+@'
+Set-StrictMode -Version 2
+$ErrorActionPreference = "Stop"
+
+function Resolve-PythonExe {
+    param([string]$RunRoot)
+    $scriptDir = Split-Path -Parent (Split-Path -Parent $RunRoot)
+    $venvPy = Join-Path $scriptDir "venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venvPy) { return $venvPy }
+    $cmd = Get-Command "python" -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    return $null
+}
+
+$runRoot = $PSScriptRoot
+$py = Resolve-PythonExe -RunRoot $runRoot
+if (-not $py) {
+    Write-Host "Python nicht gefunden. Bitte zuerst rwe_runner.ps1 ausführen." -ForegroundColor Red
+    Read-Host "Enter drücken zum Beenden"
+    exit 1
+}
+
+$slideshowPy = Join-Path $runRoot "rwe_slideshow.py"
+if (-not (Test-Path -LiteralPath $slideshowPy)) {
+@'
+import argparse
+import json
+import os
+import sys
+from typing import List
+
+from PIL import Image, ImageTk
+import tkinter as tk
+
+
+def load_interval(cfg_path: str, default: float = 5.0) -> float:
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f) or {}
+    except Exception:
+        return default
+
+    slideshow = cfg.get("slideshow", {}) if isinstance(cfg, dict) else {}
+    values = slideshow.get("values", {}) if isinstance(slideshow, dict) else {}
+    interval = values.get("interval_seconds", default)
+    try:
+        interval_val = float(interval)
+    except (TypeError, ValueError):
+        return default
+    return interval_val if interval_val > 0 else default
+
+
+def collect_images(out_dir: str) -> List[str]:
+    if not os.path.isdir(out_dir):
+        return []
+    images = [
+        os.path.join(out_dir, name)
+        for name in os.listdir(out_dir)
+        if name.lower().endswith(".png")
+    ]
+    return sorted(images)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-root", required=True)
+    args = parser.parse_args()
+
+    run_root = args.run_root
+    out_dir = os.path.join(run_root, "outputs")
+    cfg_path = os.path.join(run_root, "rwe_config.json")
+
+    interval = load_interval(cfg_path)
+    images = collect_images(out_dir)
+    if not images:
+        print("Keine PNG-Bilder im Ausgabeordner gefunden.")
+        return 1
+
+    root = tk.Tk()
+    root.configure(background="black")
+    root.attributes("-fullscreen", True)
+    root.attributes("-topmost", True)
+    root.focus_force()
+
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+
+    label = tk.Label(root, bg="black")
+    label.pack(expand=True, fill="both")
+
+    state = {"idx": 0}
+
+    def close(_event=None) -> None:
+        root.destroy()
+
+    def show_next() -> None:
+        path = images[state["idx"]]
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((sw, sh), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        label.configure(image=photo)
+        label.image = photo
+        state["idx"] = (state["idx"] + 1) % len(images)
+        root.after(int(interval * 1000), show_next)
+
+    root.bind("<Escape>", close)
+    root.bind("<Return>", close)
+    root.bind("<space>", close)
+    root.bind("<Button-1>", close)
+
+    show_next()
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'@ | Set-Content -LiteralPath $slideshowPy -Encoding UTF8
+}
+
+& $py $slideshowPy --run-root $runRoot
+'@ | Set-Content -LiteralPath $starterPath -Encoding UTF8
+
+    return $starterPath
+}
+
 try {
     Assert-Or-Elevate
 
@@ -1680,6 +1861,8 @@ try {
     if (-not (Test-Path -LiteralPath $runConfig)) {
         Copy-FileSafe -Src $configPath -Dst $runConfig
     }
+
+    Write-RunSlideshowStarter -RunRoot $runRoot
 
     $env:HF_HOME = $cacheDir
 
