@@ -61,7 +61,7 @@ function Get-PyLauncherPath {
 
 function Get-VideoControllers {
     try {
-        return Get-CimInstance Win32_VideoController -ErrorAction Stop
+        return @(Get-CimInstance Win32_VideoController -ErrorAction Stop)
     } catch {
         return @()
     }
