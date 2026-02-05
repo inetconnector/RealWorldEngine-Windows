@@ -2061,18 +2061,18 @@ try {
     Write-Host "Config OK." -ForegroundColor Green
 
     Write-Section "Resume mode"
-    $doResume = Prompt-YesNo -Label "Resume previous run?" -DefaultNo $true
     $runRoot = $null
-    if ($doResume) {
-        $latest = Find-LatestRunFolder -ScriptDir $scriptDir
-        if ([string]::IsNullOrWhiteSpace($latest)) {
-            Write-Host "No previous run folder found. Starting a new run." -ForegroundColor Yellow
-            $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
-        } else {
-            $runRoot = Prompt-Path -Label "Run folder to resume" -DefaultValue $latest
-        }
-    } else {
+    $latest = Find-LatestRunFolder -ScriptDir $scriptDir
+    if ([string]::IsNullOrWhiteSpace($latest)) {
+        Write-Host "No previous run folder found. Starting a new run." -ForegroundColor Yellow
         $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
+    } else {
+        $doResume = Prompt-YesNo -Label "Resume previous run?" -DefaultNo $true
+        if ($doResume) {
+            $runRoot = Prompt-Path -Label "Run folder to resume" -DefaultValue $latest
+        } else {
+            $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
+        }
     }
 
     Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
