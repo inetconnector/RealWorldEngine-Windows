@@ -1,0 +1,209 @@
+{
+  "meta": {
+    "name": "RWE v0.4 config",
+    "version": 1,
+    "notes": "All motif pools and seeds are configured here. Explanations are included as JSON fields so the file stays valid JSON."
+  },
+  "initial_words": {
+    "description": "Initial seed motifs used to build the first prompts. They strongly influence early iterations and can bias the whole series because later motifs are learned from captions.",
+    "effects": [
+      "Controls the early aesthetic direction of the series",
+      "If too generic, the series can drift toward common model priors",
+      "If too specific, the series can become repetitive"
+    ],
+    "values": [
+      "mirror",
+      "archive",
+      "threshold",
+      "glyph",
+      "loop",
+      "shadow"
+    ]
+  },
+  "banned_motifs": {
+    "description": "Hard blacklist of motifs that should not enter the evolving motif bank. These words correlate with the 'hallway/interior trap' and bland geometry.",
+    "effects": [
+      "Prevents the system from learning interior/hallway cues from captions",
+      "Reduces repeated corridors, rooms, walls, floors, furniture",
+      "Helps avoid monotone color cues like 'white/gray/black' dominating"
+    ],
+    "values": [
+      "room",
+      "rooms",
+      "hallway",
+      "corridor",
+      "wall",
+      "walls",
+      "ceiling",
+      "floor",
+      "floors",
+      "door",
+      "doors",
+      "window",
+      "windows",
+      "interior",
+      "inside",
+      "hall",
+      "white",
+      "black",
+      "gray",
+      "grey",
+      "long",
+      "dark",
+      "light",
+      "table",
+      "chair",
+      "chairs",
+      "bed",
+      "sofa",
+      "carpet",
+      "tile",
+      "tiles",
+      "corner",
+      "corners"
+    ]
+  },
+  "stopwords": {
+    "description": "Words filtered out when extracting keywords from image captions. This removes grammar words and generic image words so only meaningful motifs remain. The system also unions this list with banned_motifs internally.",
+    "effects": [
+      "Keeps the learned motif bank clean and specific",
+      "Avoids learning generic noise like 'photo', 'image', 'showing'",
+      "Improves motif diversity by focusing on content words"
+    ],
+    "values": [
+      "a",
+      "an",
+      "the",
+      "and",
+      "or",
+      "but",
+      "with",
+      "without",
+      "of",
+      "in",
+      "on",
+      "at",
+      "to",
+      "from",
+      "is",
+      "are",
+      "was",
+      "were",
+      "be",
+      "been",
+      "being",
+      "as",
+      "by",
+      "for",
+      "into",
+      "over",
+      "under",
+      "this",
+      "that",
+      "these",
+      "those",
+      "it",
+      "its",
+      "their",
+      "his",
+      "her",
+      "your",
+      "our",
+      "my",
+      "image",
+      "picture",
+      "scene",
+      "photograph",
+      "photo",
+      "illustration",
+      "art",
+      "painting",
+      "showing",
+      "shows",
+      "depicts",
+      "depicting",
+      "there",
+      "here"
+    ]
+  },
+  "style_pool": {
+    "description": "A rotating list of style clauses appended to the prompt. Rotating style helps prevent local minima (same composition repeated) while keeping coherence.",
+    "effects": [
+      "Adds controlled variation without changing core motifs",
+      "Can steer the model toward exteriors, macro, diagrammatic looks",
+      "If style rotation is too strong, coherence may drop"
+    ],
+    "values": [
+      "sunlit exterior, wide angle, deep depth of field, cinematic composition",
+      "foggy landscape, monumental scale, atmospheric perspective, cinematic composition",
+      "macro photography, extreme detail, shallow depth of field, studio lighting",
+      "isometric diagram, clean geometry, technical illustration, high detail",
+      "surreal natural history, specimen display, archival labels removed, high detail",
+      "biomechanical sculpture garden, dramatic lighting, high detail"
+    ]
+  },
+  "novelty_motif_pool": {
+    "description": "Motifs used as 'novelty injections' when the series becomes too similar to the previous iteration (low novelty). These are inserted into the motif bank to force exploration.",
+    "effects": [
+      "Breaks repetition loops",
+      "Introduces new semantic directions to explore",
+      "Too much injection can reduce coherence"
+    ],
+    "values": [
+      "tidepool",
+      "cathedral forest",
+      "glass desert",
+      "moss library",
+      "floating reliquary",
+      "votive engine",
+      "weather oracle",
+      "cryptic fauna",
+      "chorus of stones",
+      "astral map",
+      "ink ocean",
+      "mechanical blossom",
+      "mycelium atlas",
+      "palimpsest",
+      "constellation",
+      "cipher",
+      "mnemonic",
+      "oracle",
+      "index",
+      "relic",
+      "diagram",
+      "schema",
+      "lens",
+      "horizon"
+    ]
+  },
+  "escape_motifs": {
+    "description": "Motifs used when the system detects an 'interior trap' (captions repeatedly mention interior/hallway cues). Escape motifs push the scene outdoors and toward open compositions.",
+    "effects": [
+      "Actively counteracts interior/hallway attractors",
+      "Shifts compositions toward open sky/landscape/ruins",
+      "Combines well with style rotation for fast recovery"
+    ],
+    "values": [
+      "open sky",
+      "mountain ridge",
+      "river delta",
+      "coastal cliffs",
+      "desert monolith",
+      "storm front",
+      "sunbeam",
+      "wild meadow",
+      "giant statue",
+      "ruins"
+    ]
+  },
+  "runtime_defaults": {
+    "description": "Defaults used by the runner if you do not override interactively.",
+    "effects": [
+      "Convenient defaults for repeatable runs",
+      "You can still override iterations and HF token interactively"
+    ],
+    "values": {
+      "iterations": 10
+    }
+  }
+}

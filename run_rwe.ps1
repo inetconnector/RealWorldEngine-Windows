@@ -1,0 +1,1116 @@
+Set-StrictMode -Version 2
+$ErrorActionPreference = "Stop"
+
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null } catch { }
+
+function Write-Section { param([string]$Text) Write-Host ""; Write-Host ("=== {0} ===" -f $Text) -ForegroundColor Cyan }
+function Wait-ForEnter { param([string]$Message = "Press Enter to continue...") [void](Read-Host $Message) }
+
+function Show-ErrorAndWait {
+    param([string]$Context, [System.Exception]$Ex)
+    Write-Host ""
+    Write-Host ("[ERROR] {0}" -f $Context) -ForegroundColor Red
+    if ($Ex) { Write-Host $Ex.ToString() -ForegroundColor DarkRed }
+    Write-Host ""
+    Wait-ForEnter
+}
+
+function Get-ScriptPath {
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { return $PSCommandPath }
+    try { $p = $MyInvocation.MyCommand.Path; if ($p -and (Test-Path -LiteralPath $p)) { return $p } } catch { }
+    try { $d = $MyInvocation.MyCommand.Definition; if ($d -and (Test-Path -LiteralPath $d)) { return $d } } catch { }
+    return $null
+}
+
+function Get-ScriptDir {
+    $sp = Get-ScriptPath
+    if ([string]::IsNullOrWhiteSpace($sp)) { return $null }
+    return (Split-Path -Parent $sp)
+}
+
+function Get-PowerShellExe {
+    if ($PSVersionTable.PSEdition -eq "Core") { return "pwsh.exe" }
+    return "powershell.exe"
+}
+
+function Assert-Or-Elevate {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $p  = New-Object Security.Principal.WindowsPrincipal($id)
+    if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { return }
+
+    Write-Host "Not elevated. Restarting as Administrator..." -ForegroundColor Yellow
+    $scriptPath = Get-ScriptPath
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) { throw "This script must be saved as a .ps1 file to self-elevate." }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = (Get-PowerShellExe)
+    $psi.Arguments = ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`"" -f $scriptPath)
+    $psi.Verb = "runas"
+    [System.Diagnostics.Process]::Start($psi) | Out-Null
+    exit 0
+}
+
+function Ensure-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { } }
+function Ensure-Folder { param([string]$Path) if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null } }
+function Command-Exists { param([string]$Name) try { (Get-Command $Name -ErrorAction SilentlyContinue) -ne $null } catch { $false } }
+
+function Download-File {
+    param([Parameter(Mandatory=$true)][string]$Url,[Parameter(Mandatory=$true)][string]$OutFile)
+    Ensure-Tls12
+    Ensure-Folder ([System.IO.Path]::GetDirectoryName($OutFile))
+    Write-Host ("Downloading: {0}" -f $Url)
+    try {
+        if ($PSVersionTable.PSVersion.Major -le 5) { Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing }
+        else { Invoke-WebRequest -Uri $Url -OutFile $OutFile }
+        return
+    } catch { }
+    $wc = New-Object System.Net.WebClient
+    try { $wc.DownloadFile($Url, $OutFile) } finally { $wc.Dispose() }
+}
+
+function Refresh-Path {
+    $machine = [System.Environment]::GetEnvironmentVariable("Path","Machine")
+    $user    = [System.Environment]::GetEnvironmentVariable("Path","User")
+    if ($machine -and $user) { $env:Path = ($machine + ";" + $user) }
+    elseif ($machine) { $env:Path = $machine }
+}
+
+function Winget-Install {
+    param([string]$Id)
+    Write-Host ("Installing via winget: {0}" -f $Id)
+    $args = @("install","--id",$Id,"--exact","--silent","--accept-package-agreements","--accept-source-agreements")
+    $p = Start-Process -FilePath "winget" -ArgumentList $args -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { throw ("winget install failed for {0} (ExitCode={1})." -f $Id, $p.ExitCode) }
+}
+
+function Install-Python310 {
+    $has310 = $false
+    if (Command-Exists "py.exe") {
+        try {
+            $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+            if ($LASTEXITCODE -eq 0 -and ($v -match "3\s+10")) { $has310 = $true }
+        } catch { }
+    }
+
+    if ($has310) {
+        Write-Host "Python 3.10 already installed (py -3.10 works)." -ForegroundColor Green
+        return
+    }
+
+    if (Command-Exists "winget") {
+        try { Winget-Install "Python.Python.3.10"; Refresh-Path } catch { }
+    }
+
+    $has310 = $false
+    if (Command-Exists "py.exe") {
+        try {
+            $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+            if ($LASTEXITCODE -eq 0 -and ($v -match "3\s+10")) { $has310 = $true }
+        } catch { }
+    }
+
+    if ($has310) { return }
+
+    $tmp = Join-Path $env:TEMP "rwe_bootstrap"
+    Ensure-Folder $tmp
+    $pyUrl = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe"
+    $pyExe = Join-Path $tmp "python-3.10.11-amd64.exe"
+    if (-not (Test-Path -LiteralPath $pyExe)) { Download-File -Url $pyUrl -OutFile $pyExe }
+    $args = @("/quiet","InstallAllUsers=1","PrependPath=1","Include_test=0","SimpleInstall=1","SimpleInstallDescription=RWE")
+    $p = Start-Process -FilePath $pyExe -ArgumentList $args -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { throw ("Python installer failed (ExitCode={0})." -f $p.ExitCode) }
+    Refresh-Path
+
+    if (-not (Command-Exists "py.exe")) { throw "Python installed but py.exe launcher not found." }
+
+    $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not ($v -match "3\s+10")) { throw "Python 3.10 not available after install (py -3.10 failed)." }
+}
+
+function Install-Git {
+    if (Command-Exists "git.exe") { Write-Host "Git already available in PATH." -ForegroundColor Green; return }
+    if (Command-Exists "winget") {
+        try { Winget-Install "Git.Git"; Refresh-Path; if (Command-Exists "git.exe") { return } } catch { }
+    }
+    $tmp = Join-Path $env:TEMP "rwe_bootstrap"
+    Ensure-Folder $tmp
+    $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/Git-2.44.0-64-bit.exe"
+    $gitExe = Join-Path $tmp "Git-2.44.0-64-bit.exe"
+    if (-not (Test-Path -LiteralPath $gitExe)) { Download-File -Url $gitUrl -OutFile $gitExe }
+    $args = @("/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES")
+    $p = Start-Process -FilePath $gitExe -ArgumentList $args -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { throw ("Git installer failed (ExitCode={0})." -f $p.ExitCode) }
+    Refresh-Path
+    if (-not (Command-Exists "git.exe")) { throw "git.exe not found after installation." }
+}
+
+function Backup-Path {
+    param([string]$PathToBackup,[string]$BakRoot)
+    if (-not (Test-Path -LiteralPath $PathToBackup)) { return }
+    Ensure-Folder $BakRoot
+    $ts = (Get-Date).ToString("yyyyMMdd-HHmmss")
+    $dstDir = Join-Path $BakRoot $ts
+    Ensure-Folder $dstDir
+    $name = [IO.Path]::GetFileName($PathToBackup)
+    $dst = Join-Path $dstDir $name
+    Copy-Item -LiteralPath $PathToBackup -Destination $dst -Force
+}
+
+function Copy-FileSafe {
+    param([string]$Src,[string]$Dst)
+    try {
+        Ensure-Folder (Split-Path -Parent $Dst)
+        Copy-Item -LiteralPath $Src -Destination $Dst -Force
+    } catch { }
+}
+
+function Remove-VenvIfWrongPython {
+    param([string]$VenvPath)
+    $cfg = Join-Path $VenvPath "pyvenv.cfg"
+    if (-not (Test-Path -LiteralPath $cfg)) { return }
+    $content = Get-Content -LiteralPath $cfg -ErrorAction SilentlyContinue
+    if (-not $content) { return }
+    $homeLine = ($content | Where-Object { $_ -match "^home\s*=" } | Select-Object -First 1)
+    if (-not $homeLine) { return }
+    $home = ($homeLine -split "=",2)[1].Trim()
+    if ($home -match "Python27" -or $home -match "Python2") {
+        Write-Host "Detected wrong venv base (Python 2.x). Recreating venv..." -ForegroundColor Yellow
+        try { Remove-Item -LiteralPath $VenvPath -Recurse -Force -ErrorAction Stop } catch { }
+    }
+}
+
+function Ensure-Venv310 {
+    param([string]$VenvPath)
+
+    Ensure-Folder (Split-Path -Parent $VenvPath)
+    if (Test-Path -LiteralPath $VenvPath) { Remove-VenvIfWrongPython -VenvPath $VenvPath }
+
+    if (-not (Command-Exists "py.exe")) { throw "py.exe not found. Install Python 3.10 first." }
+
+    $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not ($v -match "3\s+10")) { throw "Python 3.10 is not available (py -3.10 failed)." }
+
+    if (-not (Test-Path -LiteralPath $VenvPath)) {
+        Write-Host ("Creating venv with Python 3.10: {0}" -f $VenvPath)
+        & py -3.10 -m venv $VenvPath
+    } else {
+        Write-Host ("Venv exists: {0}" -f $VenvPath) -ForegroundColor Green
+    }
+
+    $py = Join-Path $VenvPath "Scripts\python.exe"
+    $pip = Join-Path $VenvPath "Scripts\pip.exe"
+    if (-not (Test-Path -LiteralPath $py))  { throw ("Venv python not found: {0}" -f $py) }
+    if (-not (Test-Path -LiteralPath $pip)) { throw ("Venv pip not found: {0}" -f $pip) }
+
+    $ver = & $py -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not ($ver -match "3\s+10")) { throw "Venv is not Python 3.10. Delete the venv folder and rerun." }
+
+    return @{ Py=$py; Pip=$pip }
+}
+
+function Install-Pip-Packages {
+    param([string]$PipPath)
+
+    Write-Host "Upgrading pip tooling..."
+    & $PipPath install --upgrade pip wheel setuptools
+
+    Write-Host "Installing PyTorch CPU wheels..." -ForegroundColor Yellow
+    & $PipPath install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+    Write-Host "Installing pinned diffusers stack..."
+    & $PipPath install `
+        "diffusers==0.30.3" `
+        "transformers==4.44.2" `
+        "accelerate==0.33.0" `
+        "safetensors==0.4.5" `
+        "huggingface_hub==0.24.7" `
+        pillow numpy
+
+    Write-Host "Installing model extras..."
+    & $PipPath install sentencepiece protobuf
+
+    Write-Host "Installing analysis + PDF deps..."
+    & $PipPath install scikit-learn pandas reportlab matplotlib
+}
+
+function Prompt-Int {
+    param([string]$Label, [int]$DefaultValue)
+    while ($true) {
+        $v = Read-Host ("{0} [{1}]" -f $Label, $DefaultValue)
+        if ([string]::IsNullOrWhiteSpace($v)) { return $DefaultValue }
+        if ($v -match '^\d+$') { return [int]$v }
+        Write-Host "Please enter an integer." -ForegroundColor Yellow
+    }
+}
+
+function Prompt-YesNo {
+    param([string]$Label, [bool]$DefaultNo=$true)
+    $suffix = if ($DefaultNo) { " [y/N]" } else { " [Y/n]" }
+    while ($true) {
+        $v = Read-Host ($Label + $suffix)
+        if ([string]::IsNullOrWhiteSpace($v)) { return (-not $DefaultNo) }
+        $t = $v.Trim().ToLowerInvariant()
+        if ($t -eq "y" -or $t -eq "yes") { return $true }
+        if ($t -eq "n" -or $t -eq "no") { return $false }
+        Write-Host "Please enter y or n." -ForegroundColor Yellow
+    }
+}
+
+function Read-ConfigDefaultIterations {
+    param([string]$ConfigPath, [int]$Fallback)
+    try {
+        $raw = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop
+        $cfg = $raw | ConvertFrom-Json -ErrorAction Stop
+        if ($cfg -and $cfg.runtime_defaults -and $cfg.runtime_defaults.values -and $cfg.runtime_defaults.values.iterations) {
+            $n = [int]$cfg.runtime_defaults.values.iterations
+            if ($n -gt 0) { return $n }
+        }
+    } catch { }
+    return $Fallback
+}
+
+function Get-ConfigList {
+    param($Section)
+    if ($Section -eq $null) { return @() }
+    if ($Section.PSObject.Properties.Name -contains "values") {
+        $v = $Section.values
+        if ($v -is [System.Array]) { return @($v) }
+        return @()
+    }
+    if ($Section -is [System.Array]) { return @($Section) }
+    return @()
+}
+
+function Validate-Config {
+    param([string]$ConfigPath)
+
+    $raw = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop
+    $cfg = $raw | ConvertFrom-Json -ErrorAction Stop
+
+    $required = @(
+        "initial_words",
+        "banned_motifs",
+        "stopwords",
+        "style_pool",
+        "novelty_motif_pool",
+        "escape_motifs"
+    )
+
+    foreach ($k in $required) {
+        if (-not ($cfg.PSObject.Properties.Name -contains $k)) {
+            throw ("Config missing required key: {0}" -f $k)
+        }
+        $lst = Get-ConfigList -Section $cfg.$k
+        if (-not $lst -or $lst.Count -lt 1) {
+            throw ("Config key '{0}' must have a non-empty 'values' array." -f $k)
+        }
+    }
+
+    $iters = Read-ConfigDefaultIterations -ConfigPath $ConfigPath -Fallback 10
+    if ($iters -lt 1 -or $iters -gt 100000) {
+        throw "Config runtime_defaults.values.iterations must be between 1 and 100000."
+    }
+}
+
+function New-RunFolderNextToScript {
+    param([string]$ScriptDir)
+    $dateStamp = (Get-Date).ToString("yyyy-MM-dd")
+    $base = Join-Path $ScriptDir $dateStamp
+    Ensure-Folder $base
+    $runStamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
+    $run = Join-Path $base ("run-" + $runStamp)
+    Ensure-Folder $run
+    return $run
+}
+
+function Find-LatestRunFolder {
+    param([string]$ScriptDir)
+    $dirs = Get-ChildItem -LiteralPath $ScriptDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' } | Sort-Object Name -Descending
+    foreach ($d in $dirs) {
+        $runs = Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^run-\d{8}-\d{6}$' } | Sort-Object Name -Descending
+        foreach ($r in $runs) {
+            $state = Join-Path (Join-Path $r.FullName "outputs") "world_state.json"
+            $log = Join-Path (Join-Path $r.FullName "outputs") "world_log.jsonl"
+            if (Test-Path -LiteralPath $state -or Test-Path -LiteralPath $log) {
+                return $r.FullName
+            }
+        }
+    }
+    return $null
+}
+
+function Prompt-Path {
+    param([string]$Label, [string]$DefaultValue)
+    while ($true) {
+        $v = Read-Host ("{0} [{1}]" -f $Label, $DefaultValue)
+        if ([string]::IsNullOrWhiteSpace($v)) { $v = $DefaultValue }
+        $v = $v.Trim()
+        if (Test-Path -LiteralPath $v) { return $v }
+        Write-Host "Path not found. Please enter an existing path." -ForegroundColor Yellow
+    }
+}
+
+function Write-RWE-Python {
+    param([string]$AppDir)
+
+    Ensure-Folder $AppDir
+    $rwePy = Join-Path $AppDir "rwe_v04.py"
+
+@'
+import os
+import re
+import json
+import time
+import math
+import random
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Any, Optional, Tuple
+
+import numpy as np
+import torch
+from PIL import Image, ImageDraw, ImageFont
+
+from huggingface_hub import login
+from diffusers import StableDiffusionXLPipeline, StableDiffusionPipeline
+from transformers import (
+    BlipProcessor, BlipForConditionalGeneration,
+    CLIPProcessor, CLIPModel
+)
+
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
+
+def _as_list(v: Any) -> List[str]:
+    if isinstance(v, list):
+        out: List[str] = []
+        for x in v:
+            if x is None:
+                continue
+            s = str(x).strip()
+            if s:
+                out.append(s)
+        return out
+    if isinstance(v, dict) and "values" in v:
+        return _as_list(v.get("values"))
+    return []
+
+def load_config(path: str) -> Dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+_CFG_PATH = os.environ.get("RWE_CONFIG", "").strip()
+CFG = load_config(_CFG_PATH)
+
+BANNED_MOTIFS = set(s.lower() for s in _as_list(CFG.get("banned_motifs", [])))
+STOPWORDS = set(s.lower() for s in _as_list(CFG.get("stopwords", []))).union(BANNED_MOTIFS)
+
+STYLE_POOL = _as_list(CFG.get("style_pool", [])) or [
+    "sunlit exterior, wide angle, deep depth of field, cinematic composition",
+]
+
+NOVELTY_MOTIF_POOL = _as_list(CFG.get("novelty_motif_pool", [])) or [
+    "tidepool", "cathedral forest", "glass desert",
+]
+
+ESCAPE_MOTIFS = _as_list(CFG.get("escape_motifs", [])) or [
+    "open sky", "mountain ridge", "coastal cliffs",
+]
+
+INITIAL_WORDS = _as_list(CFG.get("initial_words", [])) or [
+    "mirror", "archive", "threshold", "glyph", "loop", "shadow"
+]
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+def now_stamp() -> str:
+    return time.strftime("%Y%m%d-%H%M%S")
+
+def cosine(a: np.ndarray, b: np.ndarray) -> float:
+    na = np.linalg.norm(a) + 1e-9
+    nb = np.linalg.norm(b) + 1e-9
+    return float(np.dot(a, b) / (na * nb))
+
+def tokenize_keywords(text: str, max_words: int = 12) -> List[str]:
+    words = re.findall(r"[a-zA-Z][a-zA-Z\-']+", text.lower())
+    out: List[str] = []
+    for w in words:
+        if w in STOPWORDS:
+            continue
+        if len(w) < 3:
+            continue
+        if w not in out:
+            out.append(w)
+        if len(out) >= max_words:
+            break
+    return out
+
+def likely_interior(caption: str) -> bool:
+    c = caption.lower()
+    hits = 0
+    for t in ("room","hallway","corridor","wall","ceiling","floor","interior"):
+        if t in c:
+            hits += 1
+    return hits >= 2
+
+@dataclass
+class WorldState:
+    iteration: int = 0
+    motif_bank: List[str] = None
+    prompt_style: str = STYLE_POOL[0]
+    negative: str = "lowres, blurry, artifacts, text, watermark, logo, signature, deformed"
+    width: int = 512
+    height: int = 512
+    steps: int = 22
+    cfg: float = 6.0
+    novelty_target: float = 0.28
+    seed: int = -1
+    interior_strikes: int = 0
+    style_index: int = 0
+    backend: str = "auto"
+
+    def __post_init__(self):
+        if self.motif_bank is None:
+            self.motif_bank = list(dict.fromkeys([w for w in INITIAL_WORDS if w]))
+
+@dataclass
+class IterationRecord:
+    iteration: int
+    ts: int
+    prompt: str
+    negative: str
+    width: int
+    height: int
+    steps: int
+    cfg: float
+    seed: int
+    image_path: str
+    caption: str
+    motifs_added: List[str]
+    similarity_prev: Optional[float]
+    novelty_prev: Optional[float]
+    rule_change: str
+    embedding_path: str
+    interior_strikes: int
+    backend: str
+
+class RWEv04:
+    def __init__(self, out_dir: str):
+        self.out_dir = out_dir
+        self.state_path = os.path.join(out_dir, "world_state.json")
+        self.log_path = os.path.join(out_dir, "world_log.jsonl")
+        self.emb_dir = os.path.join(out_dir, "embeddings")
+        ensure_dir(out_dir)
+        ensure_dir(self.emb_dir)
+
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
+
+        self.world = self._load_state()
+
+        self.pipe, self.backend = self._load_generation_backend()
+        self.blip_processor, self.blip = self._load_blip()
+        self.clip_processor, self.clip = self._load_clip()
+        self.prev_embed: Optional[np.ndarray] = None
+
+    def _load_state(self) -> WorldState:
+        if os.path.exists(self.state_path):
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k, default in (("interior_strikes",0),("style_index",0),("backend","auto")):
+                if k not in data:
+                    data[k] = default
+            return WorldState(**data)
+        return WorldState()
+
+    def _save_state(self) -> None:
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump(asdict(self.world), f, ensure_ascii=False, indent=2)
+
+    def _append_log(self, rec: IterationRecord) -> None:
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
+
+    def _load_generation_backend(self):
+        sdxl_id = os.environ.get("RWE_SDXL_MODEL", "stabilityai/stable-diffusion-xl-base-1.0")
+        sd15_id = os.environ.get("RWE_SD15_MODEL", "runwayml/stable-diffusion-v1-5")
+
+        if self.world.backend == "sd15":
+            return self._load_sd15(sd15_id), "sd15"
+        if self.world.backend == "sdxl":
+            return self._load_sdxl(sdxl_id), "sdxl"
+
+        try:
+            p = self._load_sdxl(sdxl_id)
+            self.world.backend = "sdxl"
+            return p, "sdxl"
+        except Exception as e:
+            print("SDXL load failed. Falling back to SD 1.5.")
+            print(str(e))
+            p = self._load_sd15(sd15_id)
+            self.world.backend = "sd15"
+            self.world.width = 512
+            self.world.height = 512
+            self.world.steps = min(28, max(18, int(self.world.steps)))
+            return p, "sd15"
+
+    def _load_sdxl(self, model_id: str):
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            model_id,
+            torch_dtype=self.dtype,
+            use_safetensors=True,
+            variant="fp16" if self.dtype == torch.float16 else None,
+        )
+        pipe = pipe.to(self.device)
+        if self.device == "cuda":
+            pipe.enable_attention_slicing()
+            try:
+                pipe.enable_vae_tiling()
+            except Exception:
+                pass
+        return pipe
+
+    def _load_sd15(self, model_id: str):
+        pipe = StableDiffusionPipeline.from_pretrained(
+            model_id,
+            torch_dtype=self.dtype,
+            safety_checker=None,
+        )
+        pipe = pipe.to(self.device)
+        if self.device == "cuda":
+            pipe.enable_attention_slicing()
+        return pipe
+
+    def _load_blip(self):
+        model_id = os.environ.get("RWE_BLIP_MODEL", "Salesforce/blip-image-captioning-base")
+        processor = BlipProcessor.from_pretrained(model_id)
+        model = BlipForConditionalGeneration.from_pretrained(model_id).to(self.device)
+        model.eval()
+        return processor, model
+
+    def _load_clip(self):
+        model_id = os.environ.get("RWE_CLIP_MODEL", "openai/clip-vit-base-patch32")
+        processor = CLIPProcessor.from_pretrained(model_id)
+        model = CLIPModel.from_pretrained(model_id).to(self.device)
+        model.eval()
+        return processor, model
+
+    def _make_prompt(self) -> str:
+        motifs = self.world.motif_bank[:]
+        random.shuffle(motifs)
+        motifs = motifs[: min(7, len(motifs))]
+        core = ", ".join(motifs)
+        return f"{core}, {self.world.prompt_style}"
+
+    def _gen_seed(self) -> int:
+        if self.world.seed >= 0:
+            return self.world.seed
+        return random.randint(0, 2**31 - 1)
+
+    @torch.inference_mode()
+    def _generate_image(self, prompt: str, seed: int) -> Image.Image:
+        gen = torch.Generator(device=self.device).manual_seed(seed) if self.device == "cuda" else None
+        if self.backend == "sdxl":
+            r = self.pipe(
+                prompt=prompt,
+                negative_prompt=self.world.negative,
+                num_inference_steps=int(self.world.steps),
+                guidance_scale=float(self.world.cfg),
+                width=int(self.world.width),
+                height=int(self.world.height),
+                generator=gen,
+            )
+            return r.images[0]
+        r = self.pipe(
+            prompt=prompt,
+            negative_prompt=self.world.negative,
+            num_inference_steps=int(self.world.steps),
+            guidance_scale=float(self.world.cfg),
+            generator=gen,
+        )
+        return r.images[0]
+
+    @torch.inference_mode()
+    def _caption_image(self, img: Image.Image) -> str:
+        inputs = self.blip_processor(images=img, return_tensors="pt").to(self.device)
+        out = self.blip.generate(**inputs, max_new_tokens=40)
+        cap = self.blip_processor.decode(out[0], skip_special_tokens=True)
+        return cap.strip()
+
+    @torch.inference_mode()
+    def _embed_image(self, img: Image.Image) -> np.ndarray:
+        inputs = self.clip_processor(images=img, return_tensors="pt").to(self.device)
+        feats = self.clip.get_image_features(**inputs)
+        v = feats[0].detach().float().cpu().numpy()
+        v = v / (np.linalg.norm(v) + 1e-9)
+        return v
+
+    def _update_motifs_from_caption(self, caption: str) -> List[str]:
+        kws = tokenize_keywords(caption, max_words=10)
+        added: List[str] = []
+        for k in kws:
+            if k in BANNED_MOTIFS:
+                continue
+            if k not in self.world.motif_bank:
+                self.world.motif_bank.append(k)
+                added.append(k)
+        self.world.motif_bank = self.world.motif_bank[-64:]
+        return added
+
+    def _inject_novelty(self) -> List[str]:
+        added: List[str] = []
+        pool = NOVELTY_MOTIF_POOL[:]
+        random.shuffle(pool)
+        for cand in pool[:3]:
+            if cand not in self.world.motif_bank:
+                self.world.motif_bank.insert(0, cand)
+                added.append(cand)
+        self.world.motif_bank = self.world.motif_bank[-64:]
+        return added
+
+    def _escape_interior_trap(self) -> List[str]:
+        added: List[str] = []
+        self.world.motif_bank = [m for m in self.world.motif_bank if m.lower() not in BANNED_MOTIFS]
+        pool = ESCAPE_MOTIFS[:]
+        random.shuffle(pool)
+        for cand in pool[:3]:
+            if cand not in self.world.motif_bank:
+                self.world.motif_bank.insert(0, cand)
+                added.append(cand)
+        self.world.motif_bank = self.world.motif_bank[-64:]
+        return added
+
+    def _maybe_rotate_style(self, force: bool) -> str:
+        if force or random.random() < 0.25:
+            self.world.style_index = int((self.world.style_index + 1) % len(STYLE_POOL))
+            self.world.prompt_style = STYLE_POOL[self.world.style_index]
+            return "style_rotate"
+        return "style_keep"
+
+    def _mutate_rules(self, novelty: Optional[float], caption: str) -> Tuple[List[str], str]:
+        added: List[str] = []
+        interior = likely_interior(caption)
+        if interior:
+            self.world.interior_strikes += 1
+        else:
+            self.world.interior_strikes = max(0, self.world.interior_strikes - 1)
+
+        if self.world.interior_strikes >= 2:
+            added += self._escape_interior_trap()
+            rule_change = "escape_interior_trap+" + self._maybe_rotate_style(force=True)
+            self.world.cfg = float(np.clip(self.world.cfg + random.uniform(0.6, 1.2), 5.0, 9.0))
+            self.world.steps = int(np.clip(self.world.steps + random.choice([2, 3, 4]), 18, 36))
+            return added, rule_change
+
+        if novelty is None:
+            rule_change = "bootstrap+" + self._maybe_rotate_style(force=True)
+            added += self._inject_novelty()
+            return added, rule_change
+
+        target = float(self.world.novelty_target)
+        if novelty < (target - 0.08):
+            added += self._inject_novelty()
+            rule_change = "increase_novelty+inject+" + self._maybe_rotate_style(force=(novelty < 0.12))
+            self.world.cfg = float(np.clip(self.world.cfg + random.uniform(0.3, 1.0), 5.0, 9.0))
+            self.world.steps = int(np.clip(self.world.steps + random.choice([1,2,3]), 18, 36))
+        elif novelty > (target + 0.12):
+            rule_change = "increase_coherence+" + self._maybe_rotate_style(force=False)
+            self.world.cfg = float(np.clip(self.world.cfg + random.uniform(-0.9, -0.2), 4.8, 7.0))
+            self.world.steps = int(np.clip(self.world.steps + random.choice([-2,-1,0]), 18, 32))
+        else:
+            r = random.random()
+            if r < 0.40:
+                self.world.cfg = float(np.clip(self.world.cfg + random.uniform(-0.35, 0.35), 4.8, 9.0))
+                rule_change = "micro(cfg)"
+            elif r < 0.75:
+                self.world.steps = int(np.clip(self.world.steps + random.choice([-1,0,1]), 18, 36))
+                rule_change = "micro(steps)"
+            else:
+                rule_change = "micro(none)"
+            rule_change += "+" + self._maybe_rotate_style(force=False)
+
+        return added, rule_change
+
+    def step(self) -> None:
+        self.world.iteration += 1
+        it = self.world.iteration
+
+        prompt = self._make_prompt()
+        seed = self._gen_seed()
+
+        img = self._generate_image(prompt, seed)
+        cap = self._caption_image(img)
+        emb = self._embed_image(img)
+
+        similarity_prev = None
+        novelty_prev = None
+        if self.prev_embed is not None:
+            similarity_prev = cosine(self.prev_embed, emb)
+            novelty_prev = 1.0 - similarity_prev
+
+        motifs_added_cap = self._update_motifs_from_caption(cap)
+        motifs_added_rules, rule_change = self._mutate_rules(novelty_prev, cap)
+
+        stamp = now_stamp()
+        img_path = os.path.join(self.out_dir, f"rwe_{stamp}_iter{it:05d}.png")
+        emb_path = os.path.join(self.emb_dir, f"rwe_{stamp}_iter{it:05d}.npy")
+
+        img.save(img_path)
+        np.save(emb_path, emb.astype(np.float32))
+
+        rec = IterationRecord(
+            iteration=it,
+            ts=int(time.time()),
+            prompt=prompt,
+            negative=self.world.negative,
+            width=self.world.width,
+            height=self.world.height,
+            steps=self.world.steps,
+            cfg=self.world.cfg,
+            seed=seed,
+            image_path=img_path,
+            caption=cap,
+            motifs_added=(motifs_added_cap + motifs_added_rules),
+            similarity_prev=similarity_prev,
+            novelty_prev=novelty_prev,
+            rule_change=rule_change,
+            embedding_path=emb_path,
+            interior_strikes=int(self.world.interior_strikes),
+            backend=self.backend,
+        )
+
+        self._append_log(rec)
+        self._save_state()
+        self.prev_embed = emb
+
+        print(f"[{it}] {os.path.basename(img_path)} ({self.backend})")
+        print(f"    caption: {cap}")
+        if novelty_prev is not None:
+            print(f"    similarity_prev: {similarity_prev:.3f} | novelty_prev: {novelty_prev:.3f} | target: {self.world.novelty_target:.2f}")
+        print(f"    rule_change: {rule_change} | motifs_added: {len(rec.motifs_added)} | interior_strikes: {rec.interior_strikes}")
+
+def read_jsonl(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    out: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(json.loads(line))
+    return out
+
+def load_embeddings(records: List[Dict[str, Any]]) -> np.ndarray:
+    embs: List[np.ndarray] = []
+    for r in records:
+        p = r.get("embedding_path", "")
+        if p and os.path.exists(p):
+            embs.append(np.load(p))
+        else:
+            embs.append(np.zeros((512,), dtype=np.float32))
+    return np.vstack(embs) if embs else np.zeros((0, 512), dtype=np.float32)
+
+def choose_k_by_silhouette(X: np.ndarray, kmin: int, kmax: int) -> int:
+    if X.shape[0] < (kmin + 2):
+        return max(2, min(kmin, X.shape[0])) if X.shape[0] >= 2 else 1
+    best_k = kmin
+    best_s = -1.0
+    upper = min(kmax, X.shape[0] - 1)
+    for k in range(kmin, upper + 1):
+        km = KMeans(n_clusters=k, n_init=10, random_state=42)
+        labels = km.fit_predict(X)
+        if len(set(labels)) < 2:
+            continue
+        s = silhouette_score(X, labels, metric="cosine")
+        if s > best_s:
+            best_s = s
+            best_k = k
+    return best_k
+
+def cluster_world(out_dir: str, kmin: int = 3, kmax: int = 10) -> str:
+    log_path = os.path.join(out_dir, "world_log.jsonl")
+    records = read_jsonl(log_path)
+    if not records:
+        raise RuntimeError("No world_log.jsonl found or empty.")
+    X = load_embeddings(records)
+    if X.shape[0] < 2:
+        raise RuntimeError("Not enough embeddings to cluster.")
+
+    k = choose_k_by_silhouette(X, kmin=kmin, kmax=kmax)
+    km = KMeans(n_clusters=max(2, k), n_init=10, random_state=42)
+    labels = km.fit_predict(X)
+
+    cluster_path = os.path.join(out_dir, "clusters.json")
+    payload = {"k": int(max(2, k)), "method": "kmeans_cosine_silhouette", "items": []}
+
+    for r, lab in zip(records, labels):
+        payload["items"].append({
+            "iteration": int(r["iteration"]),
+            "image_path": r["image_path"],
+            "caption": r["caption"],
+            "cluster": int(lab),
+            "ts": int(r["ts"]),
+            "novelty_prev": r.get("novelty_prev", None),
+        })
+
+    with open(cluster_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    return cluster_path
+
+def make_contact_sheet(image_paths: List[str], out_path: str, title: str, thumb: int = 320, cols: int = 3) -> None:
+    imgs: List[Image.Image] = []
+    for p in image_paths:
+        try:
+            im = Image.open(p).convert("RGB")
+            imgs.append(im)
+        except Exception:
+            continue
+    if not imgs:
+        raise RuntimeError("No images for contact sheet.")
+
+    rows = int(math.ceil(len(imgs) / cols))
+    padding = 18
+    header = 96
+    w = cols * thumb + (cols + 1) * padding
+    h = header + rows * thumb + (rows + 1) * padding
+
+    sheet = Image.new("RGB", (w, h), (245, 245, 245))
+    draw = ImageDraw.Draw(sheet)
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 28)
+        font_small = ImageFont.truetype("arial.ttf", 18)
+    except Exception:
+        font = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
+    draw.text((padding, 18), title, fill=(0, 0, 0), font=font)
+    draw.text((padding, 58), f"n={len(imgs)}", fill=(30, 30, 30), font=font_small)
+
+    x0 = padding
+    y0 = header + padding
+    i = 0
+    for r in range(rows):
+        for c in range(cols):
+            if i >= len(imgs):
+                break
+            im = imgs[i].copy()
+            im.thumbnail((thumb, thumb))
+            x = x0 + c * (thumb + padding)
+            y = y0 + r * (thumb + padding)
+            bg = Image.new("RGB", (thumb, thumb), (255, 255, 255))
+            bx = (thumb - im.size[0]) // 2
+            by = (thumb - im.size[1]) // 2
+            bg.paste(im, (bx, by))
+            sheet.paste(bg, (x, y))
+            i += 1
+
+    sheet.save(out_path)
+
+def build_pdf(out_dir: str, clusters: Dict[str, Any]) -> str:
+    items = clusters["items"]
+    items = sorted(items, key=lambda x: x["iteration"])
+
+    atlas_dir = os.path.join(out_dir, "atlas")
+    sheets_dir = os.path.join(atlas_dir, "sheets")
+    ensure_dir(atlas_dir)
+    ensure_dir(sheets_dir)
+
+    sample_every = max(1, len(items) // 24)
+    timeline_imgs = [x["image_path"] for x in items[::sample_every]]
+    timeline_sheet = os.path.join(sheets_dir, "timeline.png")
+    make_contact_sheet(timeline_imgs, timeline_sheet, "RWE Atlas - Timeline (sampled)", thumb=320, cols=3)
+
+    pdf_path = os.path.join(atlas_dir, "rwe_atlas_v04.pdf")
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+    pw, ph = A4
+    margin = 15 * mm
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(margin, ph - 30*mm, "RWE v0.4 (config-driven) - Atlas")
+    c.setFont("Helvetica", 12)
+    c.drawString(margin, ph - 40*mm, f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    c.drawString(margin, ph - 48*mm, f"Output dir: {out_dir}")
+    cfg_path = os.environ.get("RWE_CONFIG", "").strip()
+    if cfg_path:
+        c.drawString(margin, ph - 56*mm, f"Config: {cfg_path}")
+    c.showPage()
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(margin, ph - margin, "Timeline (sampled)")
+    avail_w = pw - 2 * margin
+    avail_h = ph - 2 * margin - 18
+    c.drawImage(timeline_sheet, margin, margin, width=avail_w, height=avail_h, preserveAspectRatio=True, anchor="c")
+    c.showPage()
+    c.save()
+    return pdf_path
+
+def main() -> None:
+    out_dir = os.environ.get("RWE_OUT", r".\outputs")
+    ensure_dir(out_dir)
+
+    hf_token = os.environ.get("HF_TOKEN", "").strip()
+    if hf_token:
+        try:
+            login(token=hf_token, add_to_git_credential=False)
+        except Exception:
+            pass
+
+    iters_s = os.environ.get("RWE_ITERS", "10").strip()
+    iters = int(iters_s) if iters_s.isdigit() else 10
+
+    print("")
+    print("RWE v0.4 loop starting (config-driven)")
+    print(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    print(f"Output: {out_dir}")
+    cfg_path = os.environ.get("RWE_CONFIG", "").strip()
+    if cfg_path:
+        print(f"Config: {cfg_path}")
+    print("")
+
+    rwe = RWEv04(out_dir=out_dir)
+    for _ in range(iters):
+        rwe.step()
+
+    print("")
+    print("Clustering + PDF...")
+    cluster_path = cluster_world(out_dir)
+    with open(cluster_path, "r", encoding="utf-8") as f:
+        clusters = json.load(f)
+    pdf = build_pdf(out_dir, clusters)
+    print(f"Atlas PDF: {pdf}")
+    print("")
+    print("Done.")
+
+if __name__ == "__main__":
+    main()
+'@ | Set-Content -Path $rwePy -Encoding UTF8
+
+    return $rwePy
+}
+
+try {
+    Assert-Or-Elevate
+
+    $scriptPath = Get-ScriptPath
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) { throw "This script must be saved as a .ps1 file." }
+    $scriptDir = Get-ScriptDir
+    if ([string]::IsNullOrWhiteSpace($scriptDir)) { throw "Could not determine script directory." }
+
+    $bakRoot = Join-Path $scriptDir "bak"
+    $configPath = Join-Path $scriptDir "rwe_config.json"
+
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        throw "Missing rwe_config.json next to this ps1."
+    }
+
+    Write-Section "Backup (script + config)"
+    Backup-Path -PathToBackup $configPath -BakRoot $bakRoot
+    Backup-Path -PathToBackup $scriptPath -BakRoot $bakRoot
+
+    Write-Section "Validate config"
+    Validate-Config -ConfigPath $configPath
+    Write-Host "Config OK." -ForegroundColor Green
+
+    Write-Section "Resume mode"
+    $doResume = Prompt-YesNo -Label "Resume previous run?" -DefaultNo $true
+    $runRoot = $null
+    if ($doResume) {
+        $latest = Find-LatestRunFolder -ScriptDir $scriptDir
+        if ([string]::IsNullOrWhiteSpace($latest)) {
+            Write-Host "No previous run folder found. Starting a new run." -ForegroundColor Yellow
+            $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
+        } else {
+            $runRoot = Prompt-Path -Label "Run folder to resume" -DefaultValue $latest
+        }
+    } else {
+        $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
+    }
+
+    Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
+
+    $appDir   = Join-Path $runRoot "app"
+    $outDir   = Join-Path $runRoot "outputs"
+    $cacheDir = Join-Path $runRoot "cache"
+    $venvDir  = Join-Path $runRoot "venv"
+
+    Ensure-Folder $appDir
+    Ensure-Folder $outDir
+    Ensure-Folder $cacheDir
+
+    $runConfig = Join-Path $runRoot "rwe_config.json"
+    if (-not (Test-Path -LiteralPath $runConfig)) {
+        Copy-FileSafe -Src $configPath -Dst $runConfig
+    }
+
+    Copy-FileSafe -Src $scriptPath -Dst (Join-Path $runRoot ([IO.Path]::GetFileName($scriptPath)))
+
+    $env:HF_HOME = $cacheDir
+
+    Write-Section "Install prerequisites (Python 3.10, Git)"
+    Install-Python310
+    Install-Git
+
+    Write-Section "Create venv (Python 3.10)"
+    $venvInfo = Ensure-Venv310 -VenvPath $venvDir
+    $py  = $venvInfo.Py
+    $pip = $venvInfo.Pip
+
+    Write-Section "Install packages"
+    Install-Pip-Packages -PipPath $pip
+
+    Write-Section "Write RWE Python"
+    $rwePy = Write-RWE-Python -AppDir $appDir
+
+    Write-Section "Run settings"
+    $defaultIters = Read-ConfigDefaultIterations -ConfigPath $runConfig -Fallback 10
+    $iters = Prompt-Int -Label "Iterations" -DefaultValue $defaultIters
+
+    $token = Read-Host "Hugging Face token (optional - press Enter to skip)"
+    if (-not [string]::IsNullOrWhiteSpace($token)) { $env:HF_TOKEN = $token.Trim() }
+
+    $env:RWE_CONFIG = $runConfig
+    $env:RWE_OUT    = $outDir
+    $env:RWE_ITERS  = [string]$iters
+
+    Write-Section "Start"
+    Write-Host ("Python: {0}" -f $py) -ForegroundColor Green
+    Write-Host ("Script: {0}" -f $rwePy) -ForegroundColor Green
+    Write-Host ("Output: {0}" -f $outDir) -ForegroundColor Green
+
+    & $py $rwePy
+
+    if (Test-Path Env:\HF_TOKEN) { Remove-Item Env:\HF_TOKEN -ErrorAction SilentlyContinue }
+    if (Test-Path Env:\RWE_CONFIG) { Remove-Item Env:\RWE_CONFIG -ErrorAction SilentlyContinue }
+    if (Test-Path Env:\RWE_OUT) { Remove-Item Env:\RWE_OUT -ErrorAction SilentlyContinue }
+    if (Test-Path Env:\RWE_ITERS) { Remove-Item Env:\RWE_ITERS -ErrorAction SilentlyContinue }
+
+    $pdfPath = Join-Path (Join-Path $outDir "atlas") "rwe_atlas_v04.pdf"
+
+    Write-Section "Result"
+    Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
+    Write-Host ("Atlas PDF:  {0}" -f $pdfPath) -ForegroundColor Cyan
+
+    if (Test-Path -LiteralPath $pdfPath) {
+        Write-Section "Open PDF"
+        Start-Process -FilePath $pdfPath | Out-Null
+    } else {
+        Write-Host "PDF not found (generation failed or path changed)." -ForegroundColor Yellow
+    }
+
+    Wait-ForEnter "Press Enter to exit..."
+} catch {
+    Show-ErrorAndWait "Fatal error." $_.Exception
+}
