@@ -53,6 +53,11 @@ function Assert-Or-Elevate {
 function Ensure-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { } }
 function Ensure-Folder { param([string]$Path) if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null } }
 function Command-Exists { param([string]$Name) try { (Get-Command $Name -ErrorAction SilentlyContinue) -ne $null } catch { $false } }
+function Get-PyLauncherPath {
+    $cmd = Get-Command "py.exe" -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    return "py.exe"
+}
 
 function Get-VideoControllers {
     try {
@@ -215,7 +220,8 @@ function Install-Python310 {
     $has310 = $false
     if (Command-Exists "py.exe") {
         try {
-            $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+            $pyLauncher = Get-PyLauncherPath
+            $v = & $pyLauncher -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
             if ($LASTEXITCODE -eq 0 -and ($v -match "3\s+10")) { $has310 = $true }
         } catch { }
     }
@@ -232,7 +238,8 @@ function Install-Python310 {
     $has310 = $false
     if (Command-Exists "py.exe") {
         try {
-            $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+            $pyLauncher = Get-PyLauncherPath
+            $v = & $pyLauncher -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
             if ($LASTEXITCODE -eq 0 -and ($v -match "3\s+10")) { $has310 = $true }
         } catch { }
     }
@@ -251,7 +258,8 @@ function Install-Python310 {
 
     if (-not (Command-Exists "py.exe")) { throw "Python installed but py.exe launcher not found." }
 
-    $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+    $pyLauncher = Get-PyLauncherPath
+    $v = & $pyLauncher -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
     if ($LASTEXITCODE -ne 0 -or -not ($v -match "3\s+10")) { throw "Python 3.10 not available after install (py -3.10 failed)." }
 }
 
@@ -303,12 +311,13 @@ function Ensure-Venv310 {
 
     if (-not (Command-Exists "py.exe")) { throw "py.exe not found. Install Python 3.10 first." }
 
-    $v = & py -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
+    $pyLauncher = Get-PyLauncherPath
+    $v = & $pyLauncher -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
     if ($LASTEXITCODE -ne 0 -or -not ($v -match "3\s+10")) { throw "Python 3.10 is not available (py -3.10 failed)." }
 
     if (-not (Test-Path -LiteralPath $VenvPath)) {
         Write-Host ("Creating venv with Python 3.10: {0}" -f $VenvPath)
-        & py -3.10 -m venv $VenvPath
+        & $pyLauncher -3.10 -m venv $VenvPath
     } else {
         Write-Host ("Venv exists: {0}" -f $VenvPath) -ForegroundColor Green
     }
