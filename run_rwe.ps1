@@ -363,6 +363,8 @@ import json
 import time
 import math
 import random
+import subprocess
+import sys
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -436,6 +438,75 @@ def ensure_dir(path: str) -> None:
 
 def now_stamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
+
+IMAGE_VIEWER_PROC: Optional[subprocess.Popen] = None
+SHOW_IMAGES: Optional[bool] = None
+
+def prompt_show_images() -> bool:
+    prompt = "Bilder im Vollbild anzeigen? [Y/n]: "
+    try:
+        ans = input(prompt).strip().lower()
+    except EOFError:
+        return True
+    if not ans:
+        return True
+    return ans in {"y", "yes", "j", "ja"}
+
+def _viewer_code() -> str:
+    return r"""
+import sys
+from PIL import Image, ImageTk
+import tkinter as tk
+
+path = sys.argv[1]
+root = tk.Tk()
+root.configure(background="black")
+root.attributes("-fullscreen", True)
+root.attributes("-topmost", True)
+root.focus_force()
+
+def close(_event=None):
+    try:
+        root.destroy()
+    except Exception:
+        pass
+
+root.bind("<Return>", close)
+root.bind("<space>", close)
+
+sw = root.winfo_screenwidth()
+sh = root.winfo_screenheight()
+img = Image.open(path).convert("RGB")
+img.thumbnail((sw, sh), Image.LANCZOS)
+photo = ImageTk.PhotoImage(img)
+label = tk.Label(root, image=photo, bg="black")
+label.image = photo
+label.pack(expand=True)
+
+root.mainloop()
+"""
+
+def show_image_fullscreen(path: str) -> None:
+    global IMAGE_VIEWER_PROC
+    if IMAGE_VIEWER_PROC is not None and IMAGE_VIEWER_PROC.poll() is None:
+        try:
+            IMAGE_VIEWER_PROC.terminate()
+            IMAGE_VIEWER_PROC.wait(timeout=2)
+        except Exception:
+            try:
+                IMAGE_VIEWER_PROC.kill()
+            except Exception:
+                pass
+    try:
+        IMAGE_VIEWER_PROC = subprocess.Popen(
+            [sys.executable, "-c", _viewer_code(), path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except Exception:
+        IMAGE_VIEWER_PROC = None
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
     na = np.linalg.norm(a) + 1e-9
@@ -769,6 +840,9 @@ class RWEv04:
         img.save(img_path)
         np.save(emb_path, emb.astype(np.float32))
 
+        if SHOW_IMAGES:
+            show_image_fullscreen(img_path)
+
         rec = IterationRecord(
             iteration=it,
             ts=int(time.time()),
@@ -958,6 +1032,7 @@ def build_pdf(out_dir: str, clusters: Dict[str, Any]) -> str:
     return pdf_path
 
 def main() -> None:
+    global SHOW_IMAGES
     out_dir = os.environ.get("RWE_OUT", r".\outputs")
     ensure_dir(out_dir)
 
@@ -970,6 +1045,8 @@ def main() -> None:
 
     iters_s = os.environ.get("RWE_ITERS", "10").strip()
     iters = int(iters_s) if iters_s.isdigit() else 10
+
+    SHOW_IMAGES = prompt_show_images()
 
     print("")
     print("RWE v0.4 loop starting (config-driven)")
