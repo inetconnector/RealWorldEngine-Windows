@@ -779,7 +779,11 @@ function Invoke-ProcessStreamingToProgress {
     $p.BeginErrorReadLine()
 
     $lastUiTs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $lastOutputMs = $lastUiTs
+    $lastHeartbeatMs = $lastUiTs
     $minIntervalMs = 250
+    $heartbeatIntervalMs = 15000
+    $stallHintMs = 30000
 
     while (-not $p.HasExited) {
         $line = $null
@@ -793,6 +797,7 @@ function Invoke-ProcessStreamingToProgress {
             }
 
             $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $lastOutputMs = $nowMs
             if (($nowMs - $lastUiTs) -ge $minIntervalMs) {
                 $msg = $line.Trim()
                 if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) + "..." }
@@ -802,6 +807,18 @@ function Invoke-ProcessStreamingToProgress {
         }
 
         if (-not $had) {
+            $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            if ((($nowMs - $lastOutputMs) -ge $stallHintMs) -and (($nowMs - $lastHeartbeatMs) -ge $heartbeatIntervalMs)) {
+                $noOutputSec = [Math]::Round((($nowMs - $lastOutputMs) / 1000.0), 0)
+                $logHint = ""
+                if (-not [string]::IsNullOrWhiteSpace($LogFile)) {
+                    $logHint = " See " + [System.IO.Path]::GetFileName($LogFile) + "."
+                }
+                $msg = ("Still working... no output for {0}s.{1}" -f $noOutputSec, $logHint)
+                Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $msg -Phase $Phase
+                $lastHeartbeatMs = $nowMs
+                $lastUiTs = $nowMs
+            }
             Start-Sleep -Milliseconds 80
         }
     }
