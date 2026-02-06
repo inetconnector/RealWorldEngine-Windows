@@ -717,6 +717,93 @@ function New-RunFolderNextToScript {
     return $run
 }
 
+function Invoke-ProcessStreamingToProgress {
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [Parameter(Mandatory=$true)][string[]]$ArgumentList,
+        [Parameter(Mandatory=$true)][string]$ProgressFile,
+        [Parameter(Mandatory=$true)][double]$Percent,
+        [Parameter(Mandatory=$true)][string]$Phase,
+        [string]$LogFile = ""
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = ($ArgumentList -join " ")
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.CreateNoWindow = $true
+
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+
+    $null = $p.Start()
+
+    $stdout = $p.StandardOutput
+    $stderr = $p.StandardError
+
+    $lastUiTs = 0
+    $minIntervalSec = 0.25
+
+    while (-not $p.HasExited) {
+        $line = $null
+
+        if (-not $stdout.EndOfStream) {
+            $line = $stdout.ReadLine()
+        } elseif (-not $stderr.EndOfStream) {
+            $line = $stderr.ReadLine()
+        } else {
+            Start-Sleep -Milliseconds 50
+        }
+
+        if ($line -and -not [string]::IsNullOrWhiteSpace($line)) {
+            if ($LogFile) {
+                try { Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8 } catch { }
+            }
+
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            if (($now - $lastUiTs) -ge $minIntervalSec) {
+                $msg = $line.Trim()
+                if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) + "..." }
+                Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $msg -Phase $Phase
+                $lastUiTs = $now
+            }
+        }
+    }
+
+    try {
+        while (-not $stdout.EndOfStream) {
+            $l = $stdout.ReadLine()
+            if ($l) {
+                if ($LogFile) { try { Add-Content -LiteralPath $LogFile -Value $l -Encoding UTF8 } catch { } }
+                $m = $l.Trim()
+                if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + "..." }
+                Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $m -Phase $Phase
+            }
+        }
+    } catch { }
+
+    try {
+        while (-not $stderr.EndOfStream) {
+            $l = $stderr.ReadLine()
+            if ($l) {
+                if ($LogFile) { try { Add-Content -LiteralPath $LogFile -Value $l -Encoding UTF8 } catch { } }
+                $m = $l.Trim()
+                if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + "..." }
+                Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $m -Phase $Phase
+            }
+        }
+    } catch { }
+
+    $p.WaitForExit()
+
+    if ($p.ExitCode -ne 0) {
+        throw ("Process failed: {0} (ExitCode={1})" -f $FilePath, $p.ExitCode)
+    }
+}
+
+
 function Find-LatestRunFolder {
     param([string]$ScriptDir)
     $dirs = Get-ChildItem -LiteralPath $ScriptDir -Directory -ErrorAction SilentlyContinue |
@@ -939,11 +1026,24 @@ try {
     Apply-HFTokenFromFile -TokenFile $tokenFile
 
     Write-ProgressEvent -ProgressFile $progressFile -Percent 70 -Message "Prefetching models (downloads happen here)" -Phase "prefetch"
+
     if (Test-Path -LiteralPath $prefetchPy) {
+        $prefetchLog = Join-Path $runRoot "prefetch_output.log"
+        try { Remove-Item -LiteralPath $prefetchLog -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
+
         $env:RWE_PROGRESS = $progressFile
-        & $py $prefetchPy --progress $progressFile
+
+        Invoke-ProcessStreamingToProgress `
+            -FilePath $py `
+            -ArgumentList @("`"$prefetchPy`"", "--progress", "`"$progressFile`"") `
+            -ProgressFile $progressFile `
+            -Percent 72 `
+            -Phase "prefetch" `
+            -LogFile $prefetchLog
+
         if (Test-Path Env:\RWE_PROGRESS) { Remove-Item Env:\RWE_PROGRESS -ErrorAction SilentlyContinue }
     }
+
 
     Write-ProgressEvent -ProgressFile $progressFile -Percent 90 -Message "Opening config editor" -Phase "bootstrap" -Close
     Stop-LoadingUi -Proc $loadingUi
