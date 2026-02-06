@@ -12,8 +12,8 @@ appp/
 # Cache
 cache/
 
-# Date-based run folders (e.g. 2026-02-06)
-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
+# Date folders in repo root only (e.g. 2026-02-06)
+/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
 
 # Optional: Python bytecode
 __pycache__/
