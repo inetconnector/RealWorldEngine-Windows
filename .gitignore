@@ -18,3 +18,4 @@ cache/
 # Optional: Python bytecode
 __pycache__/
 *.pyc
+*.log

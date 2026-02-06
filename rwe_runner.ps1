@@ -12,7 +12,20 @@ function Show-ErrorAndWait {
     Write-Host ("[ERROR] {0}" -f $Context) -ForegroundColor Red
     if ($Ex) { Write-Host $Ex.ToString() -ForegroundColor DarkRed }
     Write-Host ""
-    Wait-ForEnter
+    exit 1
+}
+
+function Minimize-ConsoleWindow {
+    try {
+        Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+'@ -ErrorAction SilentlyContinue | Out-Null
+        $h = [Win32.NativeMethods]::GetConsoleWindow()
+        if ($h -ne [IntPtr]::Zero) {
+            [void][Win32.NativeMethods]::ShowWindowAsync($h, 6)
+        }
+    } catch { }
 }
 
 function Get-ScriptPath {
@@ -44,8 +57,9 @@ function Assert-Or-Elevate {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = (Get-PowerShellExe)
-    $psi.Arguments = ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`"" -f $scriptPath)
+    $psi.Arguments = ("-NoProfile -WindowStyle Minimized -ExecutionPolicy Bypass -File `"{0}`"" -f $scriptPath)
     $psi.Verb = "runas"
+    try { $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Minimized } catch { }
     [System.Diagnostics.Process]::Start($psi) | Out-Null
     exit 0
 }
@@ -53,18 +67,21 @@ function Assert-Or-Elevate {
 function Ensure-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { } }
 function Ensure-Folder { param([string]$Path) if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null } }
 function Command-Exists { param([string]$Name) try { (Get-Command $Name -ErrorAction SilentlyContinue) -ne $null } catch { $false } }
+
 function Get-PyLauncherPath {
     $cmd = Get-Command "py.exe" -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source) { return $cmd.Source }
     return "py.exe"
 }
 
+function Get-PyWLauncherPath {
+    $cmd = Get-Command "pyw.exe" -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    return "pyw.exe"
+}
+
 function Get-VideoControllers {
-    try {
-        return @(Get-CimInstance Win32_VideoController -ErrorAction Stop)
-    } catch {
-        return @()
-    }
+    try { return @(Get-CimInstance Win32_VideoController -ErrorAction Stop) } catch { return @() }
 }
 
 function Test-CommandExists {
@@ -82,14 +99,8 @@ function Get-PreferredBackend {
     $hasAmd    = $joined -match "amd|radeon"
     $hasIntel  = $joined -match "intel|uhd|iris"
 
-    if ($hasNvidia -and (Test-CommandExists "nvidia-smi")) {
-        return "cuda"
-    }
-
-    if ($hasAmd -or $hasIntel -or $hasNvidia) {
-        return "directml"
-    }
-
+    if ($hasNvidia -and (Test-CommandExists "nvidia-smi")) { return "cuda" }
+    if ($hasAmd -or $hasIntel -or $hasNvidia) { return "directml" }
     return "cpu"
 }
 
@@ -98,9 +109,7 @@ function Test-VulkanRuntime {
         "$env:WINDIR\System32\vulkan-1.dll",
         "$env:WINDIR\SysWOW64\vulkan-1.dll"
     )
-    foreach ($p in $paths) {
-        if (Test-Path -LiteralPath $p) { return $true }
-    }
+    foreach ($p in $paths) { if (Test-Path -LiteralPath $p) { return $true } }
     return $false
 }
 
@@ -117,11 +126,8 @@ function Write-DetectedHardwareInfo {
             $ram = $g.AdapterRAM
             $ramGb = $null
             if ($ram -and $ram -gt 0) { $ramGb = [Math]::Round(($ram / 1GB), 1) }
-            if ($ramGb) {
-                Write-Host ("  - {0} ({1} GB VRAM reported)" -f $n, $ramGb)
-            } else {
-                Write-Host ("  - {0}" -f $n)
-            }
+            if ($ramGb) { Write-Host ("  - {0} ({1} GB VRAM reported)" -f $n, $ramGb) }
+            else { Write-Host ("  - {0}" -f $n) }
         }
     }
 
@@ -135,17 +141,66 @@ function Install-TorchForBackend {
         [Parameter(Mandatory=$true)][ValidateSet("cuda","directml","cpu")][string]$Backend
     )
 
+    $py = Join-Path (Split-Path -Parent $PipPath) "python.exe"
+    if (-not (Test-Path -LiteralPath $py)) { throw ("Venv python not found next to pip: {0}" -f $py) }
+
+    try {
+        $ok = Test-BackendInPython -PythonPath $py -Backend $Backend
+        if ($ok -eq 0) {
+            Write-Host ("Torch backend already OK: {0} (skip install)" -f $Backend) -ForegroundColor Green
+            return
+        }
+    } catch { }
+
     if ($Backend -eq "cuda") {
-        & $PipPath install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+        & $py -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
         return
     }
 
     if ($Backend -eq "directml") {
-        & $PipPath install --upgrade torch-directml
+        & $py -m pip install --upgrade torch-directml
         return
     }
 
-    & $PipPath install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    & $py -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cpu
+}
+
+function Uninstall-TorchStack {
+    param([Parameter(Mandatory=$true)][string]$PipPath)
+
+    $pkgs = @("torch","torchvision","torchaudio","torchtext","torchdata","torch-directml")
+    foreach ($p in $pkgs) {
+        try { & $PipPath uninstall -y $p 2>$null | Out-Null } catch { }
+    }
+}
+
+function Install-TorchStack {
+    param(
+        [Parameter(Mandatory=$true)][string]$PipPath,
+        [Parameter(Mandatory=$true)][string]$PythonPath,
+        [Parameter(Mandatory=$true)][ValidateSet("cuda","directml","cpu")][string]$Backend
+    )
+
+    $st = Get-TorchStatus -PythonPath $PythonPath
+    if ($st.has_torch) {
+        Write-Host ("Torch already installed ({0}). Skipping torch install." -f $st.torch_version) -ForegroundColor Green
+        return
+    }
+
+    if ($Backend -eq "cuda") {
+        & $PipPath install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+        if ($LASTEXITCODE -ne 0) { throw "Torch CUDA install failed." }
+        return
+    }
+
+    if ($Backend -eq "directml") {
+        & $PipPath install torch-directml
+        if ($LASTEXITCODE -ne 0) { throw "Torch DirectML install failed." }
+        return
+    }
+
+    & $PipPath install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    if ($LASTEXITCODE -ne 0) { throw "Torch CPU install failed." }
 }
 
 function Test-BackendInPython {
@@ -157,22 +212,32 @@ function Test-BackendInPython {
     $code = @"
 import sys
 import importlib.util
+import traceback
+
 backend = sys.argv[1]
 
 if backend == "cuda":
-    import torch
-    ok = torch.cuda.is_available()
-    print("torch.cuda.is_available() =", ok)
-    sys.exit(0 if ok else 2)
+    try:
+        import torch
+        ok = torch.cuda.is_available()
+        print("torch.cuda.is_available() =", ok)
+        sys.exit(0 if ok else 2)
+    except Exception:
+        traceback.print_exc()
+        sys.exit(2)
 
 if backend == "directml":
-    if importlib.util.find_spec("torch_directml") is None:
-        print("DirectML not installed")
+    try:
+        if importlib.util.find_spec("torch_directml") is None:
+            print("DirectML not installed")
+            sys.exit(2)
+        import torch_directml
+        d = torch_directml.device()
+        print("torch_directml.device() =", d)
+        sys.exit(0)
+    except Exception:
+        traceback.print_exc()
         sys.exit(2)
-    import torch_directml
-    d = torch_directml.device()
-    print("torch_directml.device() =", d)
-    sys.exit(0)
 
 print("CPU backend selected")
 sys.exit(0)
@@ -186,6 +251,50 @@ sys.exit(0)
 
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue | Out-Null
     return $exit
+}
+
+function Get-TorchStatus {
+    param([Parameter(Mandatory=$true)][string]$PythonPath)
+
+    $code = @'
+import json
+import importlib.util
+
+out = {
+  "has_torch": False,
+  "torch_version": None,
+  "cuda_available": False,
+  "has_directml": False,
+}
+
+try:
+  import torch
+  out["has_torch"] = True
+  out["torch_version"] = getattr(torch, "__version__", None)
+  try:
+    out["cuda_available"] = bool(torch.cuda.is_available())
+  except Exception:
+    out["cuda_available"] = False
+except Exception:
+  pass
+
+try:
+  out["has_directml"] = (importlib.util.find_spec("torch_directml") is not None)
+except Exception:
+  out["has_directml"] = False
+
+print(json.dumps(out))
+'@
+
+    $tmp = Join-Path -Path $env:TEMP -ChildPath ("rwe_torch_status_{0}.py" -f ([Guid]::NewGuid().ToString("N")))
+    Set-Content -LiteralPath $tmp -Value $code -Encoding UTF8
+    $raw = & $PythonPath $tmp 2>$null
+    $exit = $LASTEXITCODE
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue | Out-Null
+    if ($exit -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+        return @{ has_torch=$false; torch_version=$null; cuda_available=$false; has_directml=$false }
+    }
+    try { return ($raw | ConvertFrom-Json) } catch { return @{ has_torch=$false; torch_version=$null; cuda_available=$false; has_directml=$false } }
 }
 
 function Download-File {
@@ -209,6 +318,70 @@ function Refresh-Path {
     elseif ($machine) { $env:Path = $machine }
 }
 
+function Write-ProgressEvent {
+    param(
+        [string]$ProgressFile,
+        [double]$Percent,
+        [string]$Message,
+        [string]$Phase = "bootstrap",
+        [switch]$Close
+    )
+    if ([string]::IsNullOrWhiteSpace($ProgressFile)) { return }
+    try {
+        $obj = [ordered]@{
+            ts = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            phase = $Phase
+            percent = [double]$Percent
+            message = $Message
+        }
+        if ($Close) { $obj.close = $true }
+        $json = ($obj | ConvertTo-Json -Compress)
+        Add-Content -LiteralPath $ProgressFile -Value $json -Encoding UTF8
+    } catch { }
+}
+
+function Start-LoadingUi {
+    param(
+        [string]$ProgressFile,
+        [string]$AppDir,
+        [string]$TokenFile = ""
+    )
+    try {
+        if (-not (Test-Path -LiteralPath $ProgressFile)) { "" | Set-Content -LiteralPath $ProgressFile -Encoding UTF8 }
+    } catch { }
+
+    try {
+        $pyLauncher = if (Command-Exists "pyw.exe") { Get-PyWLauncherPath } else { Get-PyLauncherPath }
+        $ui = Join-Path $AppDir "rwe_loading_ui.py"
+        if (-not (Test-Path -LiteralPath $ui)) { return $null }
+        $args = @("-3.10", $ui, "--progress", $ProgressFile)
+        if ($TokenFile -and -not [string]::IsNullOrWhiteSpace($TokenFile)) { $args += @("--token-file", $TokenFile) }
+        $p = Start-Process -FilePath $pyLauncher -ArgumentList $args -PassThru -WindowStyle Normal
+        return $p
+    } catch {
+        return $null
+    }
+}
+
+function Test-UiAbort {
+    param([System.Diagnostics.Process]$Proc)
+    try { if ($Proc -and $Proc.HasExited) { return $true } } catch { }
+    return $false
+}
+
+function Stop-LoadingUi {
+    param([System.Diagnostics.Process]$Proc)
+    try {
+        if ($Proc -and (-not $Proc.HasExited)) {
+            try { $Proc.CloseMainWindow() | Out-Null } catch { }
+            try { $Proc.WaitForExit(1500) | Out-Null } catch { }
+            if (-not $Proc.HasExited) {
+                try { Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+    } catch { }
+}
+
 function Winget-Install {
     param([string]$Id)
     Write-Host ("Installing via winget: {0}" -f $Id)
@@ -227,10 +400,7 @@ function Install-Python310 {
         } catch { }
     }
 
-    if ($has310) {
-        Write-Host "Python 3.10 already installed (py -3.10 works)." -ForegroundColor Green
-        return
-    }
+    if ($has310) { Write-Host "Python 3.10 already installed (py -3.10 works)." -ForegroundColor Green; return }
 
     if (Command-Exists "winget") {
         try { Winget-Install "Python.Python.3.10"; Refresh-Path } catch { }
@@ -297,8 +467,8 @@ function Remove-VenvIfWrongPython {
     if (-not $content) { return }
     $homeLine = ($content | Where-Object { $_ -match "^home\s*=" } | Select-Object -First 1)
     if (-not $homeLine) { return }
-    $home = ($homeLine -split "=",2)[1].Trim()
-    if ($home -match "Python27" -or $home -match "Python2") {
+    $venvHome = ($homeLine -split "=",2)[1].Trim()
+    if ($venvHome -match "Python27" -or $venvHome -match "Python2") {
         Write-Host "Detected wrong venv base (Python 2.x). Recreating venv..." -ForegroundColor Yellow
         try { Remove-Item -LiteralPath $VenvPath -Recurse -Force -ErrorAction Stop } catch { }
     }
@@ -316,27 +486,43 @@ function Ensure-Venv310 {
     $v = & $pyLauncher -3.10 -c "import sys; print(sys.version_info[0], sys.version_info[1])" 2>$null
     if ($LASTEXITCODE -ne 0 -or -not ($v -match "3\s+10")) { throw "Python 3.10 is not available (py -3.10 failed)." }
 
+    function Invoke-VenvCreateCmd {
+        param([string]$PyLauncher, [string]$VenvPath)
+
+        $homeDir = $env:USERPROFILE
+        if ([string]::IsNullOrWhiteSpace($homeDir)) { $homeDir = "C:\" }
+
+        $drv = ""
+        $pth = ""
+        try {
+            $drv = [System.IO.Path]::GetPathRoot($homeDir)
+            if ($drv -and $drv.EndsWith("\")) { $drv = $drv.Substring(0, $drv.Length - 1) }
+            if ($drv -and $homeDir.Length -gt $drv.Length) { $pth = $homeDir.Substring($drv.Length) }
+        } catch { }
+
+        $cmdParts = @()
+        $cmdParts += ('set "USERPROFILE={0}"' -f $homeDir)
+        if ($drv) { $cmdParts += ('set "HOMEDRIVE={0}"' -f $drv) }
+        if ($pth) { $cmdParts += ('set "HOMEPATH={0}"' -f $pth) }
+        $cmdParts += ('"{0}" -3.10 -m venv "{1}"' -f $PyLauncher, $VenvPath)
+        $cmd = ($cmdParts -join " && ")
+
+        $p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $cmd) -Wait -NoNewWindow -PassThru
+        if ($p.ExitCode -ne 0) { throw ("Venv creation failed in cmd.exe (ExitCode={0})." -f $p.ExitCode) }
+    }
+
     if (-not (Test-Path -LiteralPath $VenvPath)) {
         Write-Host ("Creating venv with Python 3.10: {0}" -f $VenvPath)
-        $homeFallback = $env:USERPROFILE
 
-        $venvCreated = $false
+        $created = $false
         try {
             & $pyLauncher -3.10 -m venv $VenvPath
-            if ($LASTEXITCODE -eq 0) { $venvCreated = $true }
-        } catch {
-            $venvCreated = $false
-        }
+            if ($LASTEXITCODE -eq 0) { $created = $true }
+        } catch { $created = $false }
 
-        if (-not $venvCreated -and -not [string]::IsNullOrWhiteSpace($homeFallback)) {
-            Write-Host "Venv creation failed in PowerShell. Retrying via cmd.exe to avoid HOME variable errors..." -ForegroundColor Yellow
-            $cmd = "set HOME=$homeFallback && `"$pyLauncher`" -3.10 -m venv `"$VenvPath`""
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $cmd) -Wait -NoNewWindow -PassThru
-            if ($proc.ExitCode -ne 0) {
-                throw ("Venv creation failed in cmd.exe as well (ExitCode={0})." -f $proc.ExitCode)
-            }
-        } elseif (-not $venvCreated) {
-            throw "Venv creation failed and HOME fallback is unavailable."
+        if (-not $created) {
+            Write-Host "Venv creation failed in PowerShell. Retrying via cmd.exe..." -ForegroundColor Yellow
+            Invoke-VenvCreateCmd -PyLauncher $pyLauncher -VenvPath $VenvPath
         }
     } else {
         Write-Host ("Venv exists: {0}" -f $VenvPath) -ForegroundColor Green
@@ -356,23 +542,78 @@ function Ensure-Venv310 {
 function Install-Pip-Packages {
     param([string]$PipPath)
 
-    Write-Host "Upgrading pip tooling..."
-    & $PipPath install --upgrade pip wheel setuptools
+    $py = Join-Path (Split-Path -Parent $PipPath) "python.exe"
+    if (-not (Test-Path -LiteralPath $py)) { throw ("Venv python not found next to pip: {0}" -f $py) }
 
-    Write-Host "Installing pinned diffusers stack..."
-    & $PipPath install `
-        "diffusers==0.30.3" `
-        "transformers==4.44.2" `
-        "accelerate==0.33.0" `
-        "safetensors==0.4.5" `
-        "huggingface_hub==0.24.7" `
-        pillow numpy
+    function Invoke-Pip {
+        param(
+            [Parameter(Mandatory=$true)][string]$PythonPath,
+            [Parameter(Mandatory=$true)][string[]]$Args
+        )
+        & $PythonPath -m pip @Args 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw ("pip failed: {0}" -f (($Args -join " "))) }
+    }
 
-    Write-Host "Installing model extras..."
-    & $PipPath install sentencepiece protobuf
+    function Get-PipPackageVersion {
+        param([string]$PythonPath, [string]$Name)
+        $out = & $PythonPath -m pip show $Name 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
+        foreach ($line in $out) {
+            if ($line -match '^Version:\s*(.+)\s*$') { return $Matches[1].Trim() }
+        }
+        return $null
+    }
 
-    Write-Host "Installing analysis + PDF deps..."
-    & $PipPath install scikit-learn pandas reportlab matplotlib
+    function Test-PipHasExact {
+        param([string]$PythonPath, [string]$Spec)
+        if ($Spec -match '^([A-Za-z0-9_\-]+)==(.+)$') {
+            $name = $Matches[1]
+            $want = $Matches[2]
+            $have = Get-PipPackageVersion -PythonPath $PythonPath -Name $name
+            return ($have -ne $null -and $have -eq $want)
+        }
+        $name = $Spec
+        if ($name -match '^[A-Za-z0-9_\-]+$') {
+            return ((Get-PipPackageVersion -PythonPath $PythonPath -Name $name) -ne $null)
+        }
+        return $false
+    }
+
+    function Ensure-PipSpec {
+        param([string]$PythonPath, [string]$Spec)
+        if (Test-PipHasExact -PythonPath $PythonPath -Spec $Spec) {
+            Write-Host ("OK: {0}" -f $Spec) -ForegroundColor Green
+            return
+        }
+        Write-Host ("Installing: {0}" -f $Spec) -ForegroundColor Cyan
+        Invoke-Pip -PythonPath $PythonPath -Args @("install", $Spec)
+    }
+
+    Write-Host "Checking core Python packages..."
+    Invoke-Pip -PythonPath $py -Args @("install","--upgrade","pip","setuptools","wheel","--no-warn-script-location")
+
+    foreach ($tool in @("pip","setuptools","wheel")) {
+        $v = Get-PipPackageVersion -PythonPath $py -Name $tool
+        if ($v) { Write-Host ("OK: {0} {1}" -f $tool, $v) -ForegroundColor Green }
+        else { throw ("Core tool missing after upgrade: {0}" -f $tool) }
+    }
+
+    Write-Host "Ensuring pinned diffusers stack (skip if already satisfied)..."
+    foreach ($spec in @(
+        "diffusers==0.30.3",
+        "transformers==4.44.2",
+        "accelerate==0.33.0",
+        "safetensors==0.4.5",
+        "huggingface_hub==0.24.7",
+        "pillow",
+        "numpy"
+    )) { Ensure-PipSpec -PythonPath $py -Spec $spec }
+
+    Write-Host "Ensuring model extras..."
+    foreach ($spec in @("sentencepiece","protobuf")) { Ensure-PipSpec -PythonPath $py -Spec $spec }
+
+    Write-Host "Ensuring analysis + PDF deps..."
+    foreach ($spec in @("scikit-learn","pandas","reportlab","matplotlib")) { Ensure-PipSpec -PythonPath $py -Spec $spec }
 }
 
 function Prompt-Int {
@@ -429,29 +670,16 @@ function Validate-Config {
     $raw = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop
     $cfg = $raw | ConvertFrom-Json -ErrorAction Stop
 
-    $required = @(
-        "initial_words",
-        "banned_motifs",
-        "stopwords",
-        "style_pool",
-        "novelty_motif_pool",
-        "escape_motifs"
-    )
+    $required = @("initial_words","banned_motifs","stopwords","style_pool","novelty_motif_pool","escape_motifs")
 
     foreach ($k in $required) {
-        if (-not ($cfg.PSObject.Properties.Name -contains $k)) {
-            throw ("Config missing required key: {0}" -f $k)
-        }
+        if (-not ($cfg.PSObject.Properties.Name -contains $k)) { throw ("Config missing required key: {0}" -f $k) }
         $lst = Get-ConfigList -Section $cfg.$k
-        if (-not $lst -or $lst.Count -lt 1) {
-            throw ("Config key '{0}' must have a non-empty 'values' array." -f $k)
-        }
+        if (-not $lst -or $lst.Count -lt 1) { throw ("Config key '{0}' must have a non-empty 'values' array." -f $k) }
     }
 
     $iters = Read-ConfigDefaultIterations -ConfigPath $ConfigPath -Fallback 10
-    if ($iters -lt 1 -or $iters -gt 100000) {
-        throw "Config runtime_defaults.values.iterations must be between 1 and 100000."
-    }
+    if ($iters -lt 1 -or $iters -gt 100000) { throw "Config runtime_defaults.values.iterations must be between 1 and 100000." }
 
     if ($cfg.slideshow -and $cfg.slideshow.values -and $cfg.slideshow.values.interval_seconds) {
         $interval = $cfg.slideshow.values.interval_seconds
@@ -460,6 +688,22 @@ function Validate-Config {
             throw "Config slideshow.values.interval_seconds must be a positive number."
         }
     }
+}
+
+function Apply-HFTokenFromFile {
+    param([string]$TokenFile)
+    try {
+        if (-not $TokenFile) { return }
+        if (-not (Test-Path -LiteralPath $TokenFile)) { return }
+        $json = Get-Content -LiteralPath $TokenFile -Raw
+        if ([string]::IsNullOrWhiteSpace($json)) { return }
+        $o = $json | ConvertFrom-Json
+        if ($o -and $o.use -and $o.token -and -not [string]::IsNullOrWhiteSpace([string]$o.token)) {
+            $env:HF_TOKEN = [string]$o.token
+        } else {
+            if (Test-Path Env:HF_TOKEN) { Remove-Item Env:HF_TOKEN -ErrorAction SilentlyContinue | Out-Null }
+        }
+    } catch { }
 }
 
 function New-RunFolderNextToScript {
@@ -475,15 +719,17 @@ function New-RunFolderNextToScript {
 
 function Find-LatestRunFolder {
     param([string]$ScriptDir)
-    $dirs = Get-ChildItem -LiteralPath $ScriptDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' } | Sort-Object Name -Descending
+    $dirs = Get-ChildItem -LiteralPath $ScriptDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' } |
+        Sort-Object Name -Descending
     foreach ($d in $dirs) {
-        $runs = Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^run-\d{8}-\d{6}$' } | Sort-Object Name -Descending
+        $runs = Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^run-\d{8}-\d{6}$' } |
+            Sort-Object Name -Descending
         foreach ($r in $runs) {
             $state = Join-Path (Join-Path $r.FullName "outputs") "world_state.json"
-            $log = Join-Path (Join-Path $r.FullName "outputs") "world_log.jsonl"
-            if (Test-Path -LiteralPath $state -or Test-Path -LiteralPath $log) {
-                return $r.FullName
-            }
+            $log   = Join-Path (Join-Path $r.FullName "outputs") "world_log.jsonl"
+            if ((Test-Path -LiteralPath $state) -or (Test-Path -LiteralPath $log)) { return $r.FullName }
         }
     }
     return $null
@@ -500,1661 +746,225 @@ function Prompt-Path {
     }
 }
 
-function Write-RWE-Python {
+function Assert-AppFiles {
     param([string]$AppDir)
 
-    Ensure-Folder $AppDir
-    $rwePy = Join-Path $AppDir "rwe_v04.py"
-
-@'
-import os
-import re
-import json
-import time
-import math
-import random
-import subprocess
-import sys
-import importlib.util
-import textwrap
-import urllib.error
-import urllib.request
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Optional, Tuple
-
-import numpy as np
-import torch
-from PIL import Image, ImageDraw, ImageFont
-
-from huggingface_hub import login
-from diffusers import StableDiffusionXLPipeline, StableDiffusionPipeline
-from transformers import (
-    BlipProcessor, BlipForConditionalGeneration,
-    CLIPProcessor, CLIPModel
-)
-
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
-
-def _as_list(v: Any) -> List[str]:
-    if isinstance(v, list):
-        out: List[str] = []
-        for x in v:
-            if x is None:
-                continue
-            s = str(x).strip()
-            if s:
-                out.append(s)
-        return out
-    if isinstance(v, dict) and "values" in v:
-        return _as_list(v.get("values"))
-    return []
-
-def load_config(path: str) -> Dict[str, Any]:
-    if not path:
-        return {}
-    try:
-        if not os.path.exists(path):
-            return {}
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception:
-        return {}
-
-_CFG_PATH = os.environ.get("RWE_CONFIG", "").strip()
-CFG = load_config(_CFG_PATH)
-
-BANNED_MOTIFS = set(s.lower() for s in _as_list(CFG.get("banned_motifs", [])))
-STOPWORDS = set(s.lower() for s in _as_list(CFG.get("stopwords", []))).union(BANNED_MOTIFS)
-
-STYLE_POOL = _as_list(CFG.get("style_pool", [])) or [
-    "sunlit exterior, wide angle, deep depth of field, cinematic composition",
-]
-
-NOVELTY_MOTIF_POOL = _as_list(CFG.get("novelty_motif_pool", [])) or [
-    "tidepool", "cathedral forest", "glass desert",
-]
-
-ESCAPE_MOTIFS = _as_list(CFG.get("escape_motifs", [])) or [
-    "open sky", "mountain ridge", "coastal cliffs",
-]
-
-INITIAL_WORDS = _as_list(CFG.get("initial_words", [])) or [
-    "mirror", "archive", "threshold", "glyph", "loop", "shadow"
-]
-
-def _get_genesis_config(cfg: Dict[str, Any]) -> Tuple[str, int]:
-    sec = cfg.get("genesis_image", {})
-    if not isinstance(sec, dict):
-        return "", 12
-    values = sec.get("values", {}) if isinstance(sec.get("values", {}), dict) else {}
-    url = str(values.get("url", "") or "").strip()
-    kw_raw = values.get("analysis_keywords", 12)
-    try:
-        kw = int(kw_raw)
-    except (TypeError, ValueError):
-        kw = 12
-    if kw < 1:
-        kw = 12
-    return url, kw
-
-GENESIS_URL, GENESIS_KEYWORDS = _get_genesis_config(CFG)
-
-def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-def now_stamp() -> str:
-    return time.strftime("%Y%m%d-%H%M%S")
-
-IMAGE_VIEWER_PROC: Optional[subprocess.Popen] = None
-SHOW_IMAGES: Optional[bool] = None
-
-def prompt_show_images() -> bool:
-    prompt = "Bilder im Vollbild anzeigen? [Y/n]: "
-    try:
-        ans = input(prompt).strip().lower()
-    except EOFError:
-        return True
-    if not ans:
-        return True
-    return ans in {"y", "yes", "j", "ja"}
-
-def _viewer_code() -> str:
-    return r"""
-import sys
-from PIL import Image, ImageTk
-import tkinter as tk
-
-path = sys.argv[1]
-root = tk.Tk()
-root.configure(background="black")
-root.attributes("-fullscreen", True)
-root.attributes("-topmost", True)
-root.focus_force()
-
-def close(_event=None):
-    try:
-        root.destroy()
-    except Exception:
-        pass
-
-root.bind("<Return>", close)
-root.bind("<space>", close)
-
-sw = root.winfo_screenwidth()
-sh = root.winfo_screenheight()
-img = Image.open(path).convert("RGB")
-img.thumbnail((sw, sh), Image.LANCZOS)
-photo = ImageTk.PhotoImage(img)
-label = tk.Label(root, image=photo, bg="black")
-label.image = photo
-label.pack(expand=True)
-
-root.mainloop()
-"""
-
-def show_image_fullscreen(path: str) -> None:
-    global IMAGE_VIEWER_PROC
-    if IMAGE_VIEWER_PROC is not None and IMAGE_VIEWER_PROC.poll() is None:
-        try:
-            IMAGE_VIEWER_PROC.terminate()
-            IMAGE_VIEWER_PROC.wait(timeout=2)
-        except Exception:
-            try:
-                IMAGE_VIEWER_PROC.kill()
-            except Exception:
-                pass
-    try:
-        IMAGE_VIEWER_PROC = subprocess.Popen(
-            [sys.executable, "-c", _viewer_code(), path],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
-    except Exception:
-        IMAGE_VIEWER_PROC = None
-
-def _get_directml_device() -> Optional[Any]:
-    if importlib.util.find_spec("torch_directml") is None:
-        return None
-    import torch_directml
-    return torch_directml.device()
-
-def resolve_backend() -> Tuple[str, Any]:
-    pref = os.environ.get("RWE_BACKEND", "auto").strip().lower()
-
-    if pref == "cuda":
-        return "cuda", "cuda"
-    if pref == "cpu":
-        return "cpu", "cpu"
-    if pref == "directml":
-        dml = _get_directml_device()
-        if dml is not None:
-            return "directml", dml
-        return "cpu", "cpu"
-
-    if torch.cuda.is_available():
-        return "cuda", "cuda"
-
-    dml = _get_directml_device()
-    if dml is not None:
-        return "directml", dml
-    return "cpu", "cpu"
-
-def cosine(a: np.ndarray, b: np.ndarray) -> float:
-    na = np.linalg.norm(a) + 1e-9
-    nb = np.linalg.norm(b) + 1e-9
-    return float(np.dot(a, b) / (na * nb))
-
-def tokenize_keywords(text: str, max_words: int = 12) -> List[str]:
-    words = re.findall(r"[a-zA-Z][a-zA-Z\-']+", text.lower())
-    out: List[str] = []
-    for w in words:
-        if w in STOPWORDS:
-            continue
-        if len(w) < 3:
-            continue
-        if w not in out:
-            out.append(w)
-        if len(out) >= max_words:
-            break
-    return out
-
-def detect_epochs(items: List[Dict[str, Any]], sustain: int = 3, novelty_spike: float = 0.40) -> List[Dict[str, Any]]:
-    items = sorted(items, key=lambda x: x["iteration"])
-    n = len(items)
-    if n == 0:
-        return []
-
-    clusters = [int(x["cluster"]) for x in items]
-    novelty = []
-    for x in items:
-        v = x.get("novelty_prev", None)
-        novelty.append(float(v) if v is not None else 0.0)
-
-    boundaries = [0]
-
-    def stable_switch(i: int) -> bool:
-        cur = clusters[i]
-        nxt = clusters[i + 1]
-        if cur == nxt:
-            return False
-        end = min(n, i + 1 + sustain)
-        return all(clusters[j] == nxt for j in range(i + 1, end))
-
-    for i in range(0, n - 1):
-        if stable_switch(i):
-            boundaries.append(i + 1)
-            continue
-        if novelty[i + 1] >= novelty_spike:
-            boundaries.append(i + 1)
-
-    boundaries = sorted(set(boundaries))
-    epochs: List[Dict[str, Any]] = []
-    for ei, start in enumerate(boundaries):
-        end = (boundaries[ei + 1] - 1) if (ei + 1) < len(boundaries) else (n - 1)
-        seg = items[start:end + 1]
-        it0 = int(seg[0]["iteration"])
-        it1 = int(seg[-1]["iteration"])
-
-        nov = [float(x.get("novelty_prev", 0.0) or 0.0) for x in seg]
-        avg_nov = float(sum(nov) / max(1, len(nov)))
-
-        cl_counts: Dict[int, int] = {}
-        for x in seg:
-            c = int(x["cluster"])
-            cl_counts[c] = cl_counts.get(c, 0) + 1
-        top_clusters = sorted(cl_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
-
-        epochs.append({
-            "epoch_id": ei + 1,
-            "start_index": start,
-            "end_index": end,
-            "iteration_start": it0,
-            "iteration_end": it1,
-            "size": len(seg),
-            "avg_novelty": avg_nov,
-            "top_clusters": top_clusters,
-            "items": seg,
-        })
-    return epochs
-
-def motif_counts_from_captions(captions: List[str], topn: int = 15) -> List[Tuple[str, int]]:
-    counts: Dict[str, int] = {}
-    for cap in captions:
-        for t in tokenize_keywords(cap, max_words=40):
-            counts[t] = counts.get(t, 0) + 1
-    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:topn]
-
-def wrap_lines(text: str, max_len: int) -> List[str]:
-    return textwrap.wrap(text, width=max_len, break_long_words=False, break_on_hyphens=False)
-
-def likely_interior(caption: str) -> bool:
-    c = caption.lower()
-    hits = 0
-    for t in ("room","hallway","corridor","wall","ceiling","floor","interior"):
-        if t in c:
-            hits += 1
-    return hits >= 2
-
-@dataclass
-class WorldState:
-    iteration: int = 0
-    motif_bank: List[str] = None
-    prompt_style: str = STYLE_POOL[0]
-    negative: str = "lowres, blurry, artifacts, text, watermark, logo, signature, deformed"
-    width: int = 512
-    height: int = 512
-    steps: int = 22
-    cfg: float = 6.0
-    novelty_target: float = 0.28
-    seed: int = -1
-    interior_strikes: int = 0
-    style_index: int = 0
-    backend: str = "auto"
-
-    def __post_init__(self):
-        if self.motif_bank is None:
-            self.motif_bank = list(dict.fromkeys([w for w in INITIAL_WORDS if w]))
-
-@dataclass
-class IterationRecord:
-    iteration: int
-    ts: int
-    prompt: str
-    negative: str
-    width: int
-    height: int
-    steps: int
-    cfg: float
-    seed: int
-    image_path: str
-    caption: str
-    motifs_added: List[str]
-    similarity_prev: Optional[float]
-    novelty_prev: Optional[float]
-    rule_change: str
-    embedding_path: str
-    interior_strikes: int
-    backend: str
-
-class RWEv04:
-    def __init__(self, out_dir: str, genesis_url: str = "", genesis_keywords: int = 12):
-        self.out_dir = out_dir
-        self.state_path = os.path.join(out_dir, "world_state.json")
-        self.log_path = os.path.join(out_dir, "world_log.jsonl")
-        self.emb_dir = os.path.join(out_dir, "embeddings")
-        ensure_dir(out_dir)
-        ensure_dir(self.emb_dir)
-
-        self.genesis_url = genesis_url.strip()
-        self.genesis_keywords = max(1, int(genesis_keywords))
-
-        self.device_backend, self.device = resolve_backend()
-        self.dtype = torch.float16 if self.device_backend == "cuda" else torch.float32
-
-        self.world = self._load_state()
-
-        self.pipe, self.backend = self._load_generation_backend()
-        self.blip_processor, self.blip = self._load_blip()
-        self.clip_processor, self.clip = self._load_clip()
-        self.prev_embed: Optional[np.ndarray] = None
-
-        self._bootstrap_genesis()
-
-    def _load_state(self) -> WorldState:
-        if os.path.exists(self.state_path):
-            with open(self.state_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for k, default in (("interior_strikes",0),("style_index",0),("backend","auto")):
-                if k not in data:
-                    data[k] = default
-            return WorldState(**data)
-        return WorldState()
-
-    def _save_state(self) -> None:
-        with open(self.state_path, "w", encoding="utf-8") as f:
-            json.dump(asdict(self.world), f, ensure_ascii=False, indent=2)
-
-    def _append_log(self, rec: IterationRecord) -> None:
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(asdict(rec), ensure_ascii=False) + "\n")
-
-    def _load_generation_backend(self):
-        sdxl_id = os.environ.get("RWE_SDXL_MODEL", "stabilityai/stable-diffusion-xl-base-1.0")
-        sd15_id = os.environ.get("RWE_SD15_MODEL", "runwayml/stable-diffusion-v1-5")
-
-        if self.world.backend == "sd15":
-            return self._load_sd15(sd15_id), "sd15"
-        if self.world.backend == "sdxl":
-            return self._load_sdxl(sdxl_id), "sdxl"
-
-        try:
-            p = self._load_sdxl(sdxl_id)
-            self.world.backend = "sdxl"
-            return p, "sdxl"
-        except Exception as e:
-            print("SDXL load failed. Falling back to SD 1.5.")
-            print(str(e))
-            p = self._load_sd15(sd15_id)
-            self.world.backend = "sd15"
-            self.world.width = 512
-            self.world.height = 512
-            self.world.steps = min(28, max(18, int(self.world.steps)))
-            return p, "sd15"
-
-    def _load_sdxl(self, model_id: str):
-        pipe = StableDiffusionXLPipeline.from_pretrained(
-            model_id,
-            torch_dtype=self.dtype,
-            use_safetensors=True,
-            variant="fp16" if self.dtype == torch.float16 else None,
-        )
-        pipe = pipe.to(self.device)
-        if self.device == "cuda":
-            pipe.enable_attention_slicing()
-            try:
-                pipe.enable_vae_tiling()
-            except Exception:
-                pass
-        return pipe
-
-    def _load_sd15(self, model_id: str):
-        pipe = StableDiffusionPipeline.from_pretrained(
-            model_id,
-            torch_dtype=self.dtype,
-            safety_checker=None,
-        )
-        pipe = pipe.to(self.device)
-        if self.device == "cuda":
-            pipe.enable_attention_slicing()
-        return pipe
-
-    def _load_blip(self):
-        model_id = os.environ.get("RWE_BLIP_MODEL", "Salesforce/blip-image-captioning-base")
-        processor = BlipProcessor.from_pretrained(model_id)
-        model = BlipForConditionalGeneration.from_pretrained(model_id).to(self.device)
-        model.eval()
-        return processor, model
-
-    def _load_clip(self):
-        model_id = os.environ.get("RWE_CLIP_MODEL", "openai/clip-vit-base-patch32")
-        processor = CLIPProcessor.from_pretrained(model_id)
-        model = CLIPModel.from_pretrained(model_id).to(self.device)
-        model.eval()
-        return processor, model
-
-    def _make_prompt(self) -> str:
-        motifs = self.world.motif_bank[:]
-        random.shuffle(motifs)
-        motifs = motifs[: min(7, len(motifs))]
-        core = ", ".join(motifs)
-        return f"{core}, {self.world.prompt_style}"
-
-    def _gen_seed(self) -> int:
-        if self.world.seed >= 0:
-            return self.world.seed
-        return random.randint(0, 2**31 - 1)
-
-    @torch.inference_mode()
-    def _generate_image(self, prompt: str, seed: int) -> Image.Image:
-        gen = torch.Generator(device=self.device).manual_seed(seed) if self.device_backend == "cuda" else None
-        if self.backend == "sdxl":
-            r = self.pipe(
-                prompt=prompt,
-                negative_prompt=self.world.negative,
-                num_inference_steps=int(self.world.steps),
-                guidance_scale=float(self.world.cfg),
-                width=int(self.world.width),
-                height=int(self.world.height),
-                generator=gen,
-            )
-            return r.images[0]
-        r = self.pipe(
-            prompt=prompt,
-            negative_prompt=self.world.negative,
-            num_inference_steps=int(self.world.steps),
-            guidance_scale=float(self.world.cfg),
-            generator=gen,
-        )
-        return r.images[0]
-
-    @torch.inference_mode()
-    def _caption_image(self, img: Image.Image) -> str:
-        inputs = self.blip_processor(images=img, return_tensors="pt").to(self.device)
-        out = self.blip.generate(**inputs, max_new_tokens=40)
-        cap = self.blip_processor.decode(out[0], skip_special_tokens=True)
-        return cap.strip()
-
-    @torch.inference_mode()
-    def _embed_image(self, img: Image.Image) -> np.ndarray:
-        inputs = self.clip_processor(images=img, return_tensors="pt").to(self.device)
-        feats = self.clip.get_image_features(**inputs)
-        v = feats[0].detach().float().cpu().numpy()
-        v = v / (np.linalg.norm(v) + 1e-9)
-        return v
-
-    def _update_motifs_from_keywords(self, keywords: List[str]) -> List[str]:
-        added: List[str] = []
-        for k in keywords:
-            if k in BANNED_MOTIFS:
-                continue
-            if k not in self.world.motif_bank:
-                self.world.motif_bank.append(k)
-                added.append(k)
-        self.world.motif_bank = self.world.motif_bank[-64:]
-        return added
-
-    def _download_genesis(self, url: str) -> Optional[str]:
-        if not url:
-            return None
-        out_path = os.path.join(self.out_dir, "genesis_source.png")
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "RWE/0.4"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
-            with open(out_path, "wb") as f:
-                f.write(data)
-            return out_path
-        except Exception as exc:
-            print(f"Genesis download failed: {exc}")
-            return None
-
-    def _dominant_colors(self, img: Image.Image, k: int = 5) -> List[Dict[str, Any]]:
-        arr = np.array(img.convert("RGB").resize((128, 128)))
-        flat = arr.reshape(-1, 3).astype(np.float32)
-        if flat.shape[0] > 8000:
-            idx = np.random.choice(flat.shape[0], size=8000, replace=False)
-            flat = flat[idx]
-        k = max(1, min(k, flat.shape[0]))
-        if k == 1:
-            mean = flat.mean(axis=0).astype(int)
-            hexv = "#{:02x}{:02x}{:02x}".format(int(mean[0]), int(mean[1]), int(mean[2]))
-            return [{"rgb": [int(mean[0]), int(mean[1]), int(mean[2])], "hex": hexv, "count": int(flat.shape[0])}]
-        km = KMeans(n_clusters=k, n_init=5, random_state=42)
-        labels = km.fit_predict(flat)
-        counts = np.bincount(labels)
-        centers = km.cluster_centers_.astype(int)
-        order = np.argsort(-counts)
-        palette: List[Dict[str, Any]] = []
-        for i in order:
-            rgb = centers[i]
-            hexv = "#{:02x}{:02x}{:02x}".format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
-            palette.append({"rgb": [int(rgb[0]), int(rgb[1]), int(rgb[2])], "hex": hexv, "count": int(counts[i])})
-        return palette
-
-    def _analyze_genesis(self, img: Image.Image, caption: str, keywords: List[str], img_path: str) -> Dict[str, Any]:
-        arr = np.array(img.convert("RGB"))
-        h, w = arr.shape[:2]
-        luma = 0.2126 * arr[..., 0] + 0.7152 * arr[..., 1] + 0.0722 * arr[..., 2]
-        brightness = float(luma.mean() / 255.0)
-        contrast = float(luma.std() / 255.0)
-        mean_color = [float(x) for x in arr.mean(axis=(0, 1))]
-        palette = self._dominant_colors(img, k=5)
-        return {
-            "source_url": self.genesis_url,
-            "local_path": img_path,
-            "size": {"width": int(w), "height": int(h)},
-            "aspect_ratio": float(w / max(1, h)),
-            "caption": caption,
-            "keywords": keywords,
-            "mean_color": mean_color,
-            "brightness": brightness,
-            "contrast": contrast,
-            "dominant_colors": palette,
-        }
-
-    def _bootstrap_genesis(self) -> None:
-        if not self.genesis_url:
-            return
-        if self.world.iteration > 0:
-            return
-        if os.path.exists(self.log_path) and os.path.getsize(self.log_path) > 0:
-            return
-
-        print(f"Genesis: loading {self.genesis_url}")
-        img_path = self._download_genesis(self.genesis_url)
-        if not img_path:
-            print("Genesis: download failed, continuing without genesis.")
-            return
-        try:
-            img = Image.open(img_path).convert("RGB")
-        except Exception as exc:
-            print(f"Genesis: failed to open image: {exc}")
-            return
-
-        cap = self._caption_image(img)
-        emb = self._embed_image(img)
-        keywords = tokenize_keywords(cap, max_words=self.genesis_keywords)
-        motifs_added = self._update_motifs_from_keywords(keywords)
-
-        emb_path = os.path.join(self.emb_dir, "genesis.npy")
-        np.save(emb_path, emb.astype(np.float32))
-
-        analysis = self._analyze_genesis(img, cap, keywords, img_path)
-        analysis_path = os.path.join(self.out_dir, "genesis_analysis.json")
-        with open(analysis_path, "w", encoding="utf-8") as f:
-            json.dump(analysis, f, ensure_ascii=False, indent=2)
-
-        rec = IterationRecord(
-            iteration=0,
-            ts=int(time.time()),
-            prompt=f"GENESIS_URL: {self.genesis_url}",
-            negative=self.world.negative,
-            width=int(img.width),
-            height=int(img.height),
-            steps=0,
-            cfg=0.0,
-            seed=-1,
-            image_path=img_path,
-            caption=cap,
-            motifs_added=motifs_added,
-            similarity_prev=None,
-            novelty_prev=None,
-            rule_change="genesis_bootstrap",
-            embedding_path=emb_path,
-            interior_strikes=int(self.world.interior_strikes),
-            backend="genesis",
-        )
-        self._append_log(rec)
-        self._save_state()
-        self.prev_embed = emb
-
-        print("Genesis analysis:")
-        print(f"    caption: {cap}")
-        print(f"    keywords: {', '.join(keywords) if keywords else '(none)'}")
-        print(f"    brightness: {analysis['brightness']:.3f} | contrast: {analysis['contrast']:.3f}")
-        print(f"    dominant_colors: {[c['hex'] for c in analysis['dominant_colors']]}")
-        print(f"    analysis saved: {analysis_path}")
-
-    def _update_motifs_from_caption(self, caption: str) -> List[str]:
-        kws = tokenize_keywords(caption, max_words=10)
-        added: List[str] = []
-        for k in kws:
-            if k in BANNED_MOTIFS:
-                continue
-            if k not in self.world.motif_bank:
-                self.world.motif_bank.append(k)
-                added.append(k)
-        self.world.motif_bank = self.world.motif_bank[-64:]
-        return added
-
-    def _inject_novelty(self) -> List[str]:
-        added: List[str] = []
-        pool = NOVELTY_MOTIF_POOL[:]
-        random.shuffle(pool)
-        for cand in pool[:3]:
-            if cand not in self.world.motif_bank:
-                self.world.motif_bank.insert(0, cand)
-                added.append(cand)
-        self.world.motif_bank = self.world.motif_bank[-64:]
-        return added
-
-    def _escape_interior_trap(self) -> List[str]:
-        added: List[str] = []
-        self.world.motif_bank = [m for m in self.world.motif_bank if m.lower() not in BANNED_MOTIFS]
-        pool = ESCAPE_MOTIFS[:]
-        random.shuffle(pool)
-        for cand in pool[:3]:
-            if cand not in self.world.motif_bank:
-                self.world.motif_bank.insert(0, cand)
-                added.append(cand)
-        self.world.motif_bank = self.world.motif_bank[-64:]
-        return added
-
-    def _maybe_rotate_style(self, force: bool) -> str:
-        if force or random.random() < 0.25:
-            self.world.style_index = int((self.world.style_index + 1) % len(STYLE_POOL))
-            self.world.prompt_style = STYLE_POOL[self.world.style_index]
-            return "style_rotate"
-        return "style_keep"
-
-    def _mutate_rules(self, novelty: Optional[float], caption: str) -> Tuple[List[str], str]:
-        added: List[str] = []
-        interior = likely_interior(caption)
-        if interior:
-            self.world.interior_strikes += 1
-        else:
-            self.world.interior_strikes = max(0, self.world.interior_strikes - 1)
-
-        if self.world.interior_strikes >= 2:
-            added += self._escape_interior_trap()
-            rule_change = "escape_interior_trap+" + self._maybe_rotate_style(force=True)
-            self.world.cfg = float(np.clip(self.world.cfg + random.uniform(0.6, 1.2), 5.0, 9.0))
-            self.world.steps = int(np.clip(self.world.steps + random.choice([2, 3, 4]), 18, 36))
-            return added, rule_change
-
-        if novelty is None:
-            rule_change = "bootstrap+" + self._maybe_rotate_style(force=True)
-            added += self._inject_novelty()
-            return added, rule_change
-
-        target = float(self.world.novelty_target)
-        if novelty < (target - 0.08):
-            added += self._inject_novelty()
-            rule_change = "increase_novelty+inject+" + self._maybe_rotate_style(force=(novelty < 0.12))
-            self.world.cfg = float(np.clip(self.world.cfg + random.uniform(0.3, 1.0), 5.0, 9.0))
-            self.world.steps = int(np.clip(self.world.steps + random.choice([1,2,3]), 18, 36))
-        elif novelty > (target + 0.12):
-            rule_change = "increase_coherence+" + self._maybe_rotate_style(force=False)
-            self.world.cfg = float(np.clip(self.world.cfg + random.uniform(-0.9, -0.2), 4.8, 7.0))
-            self.world.steps = int(np.clip(self.world.steps + random.choice([-2,-1,0]), 18, 32))
-        else:
-            r = random.random()
-            if r < 0.40:
-                self.world.cfg = float(np.clip(self.world.cfg + random.uniform(-0.35, 0.35), 4.8, 9.0))
-                rule_change = "micro(cfg)"
-            elif r < 0.75:
-                self.world.steps = int(np.clip(self.world.steps + random.choice([-1,0,1]), 18, 36))
-                rule_change = "micro(steps)"
-            else:
-                rule_change = "micro(none)"
-            rule_change += "+" + self._maybe_rotate_style(force=False)
-
-        return added, rule_change
-
-    def step(self) -> None:
-        self.world.iteration += 1
-        it = self.world.iteration
-
-        prompt = self._make_prompt()
-        seed = self._gen_seed()
-
-        img = self._generate_image(prompt, seed)
-        cap = self._caption_image(img)
-        emb = self._embed_image(img)
-
-        similarity_prev = None
-        novelty_prev = None
-        if self.prev_embed is not None:
-            similarity_prev = cosine(self.prev_embed, emb)
-            novelty_prev = 1.0 - similarity_prev
-
-        motifs_added_cap = self._update_motifs_from_caption(cap)
-        motifs_added_rules, rule_change = self._mutate_rules(novelty_prev, cap)
-
-        stamp = now_stamp()
-        img_path = os.path.join(self.out_dir, f"rwe_{stamp}_iter{it:05d}.png")
-        emb_path = os.path.join(self.emb_dir, f"rwe_{stamp}_iter{it:05d}.npy")
-
-        img.save(img_path)
-        np.save(emb_path, emb.astype(np.float32))
-
-        if SHOW_IMAGES:
-            show_image_fullscreen(img_path)
-
-        rec = IterationRecord(
-            iteration=it,
-            ts=int(time.time()),
-            prompt=prompt,
-            negative=self.world.negative,
-            width=self.world.width,
-            height=self.world.height,
-            steps=self.world.steps,
-            cfg=self.world.cfg,
-            seed=seed,
-            image_path=img_path,
-            caption=cap,
-            motifs_added=(motifs_added_cap + motifs_added_rules),
-            similarity_prev=similarity_prev,
-            novelty_prev=novelty_prev,
-            rule_change=rule_change,
-            embedding_path=emb_path,
-            interior_strikes=int(self.world.interior_strikes),
-            backend=self.backend,
-        )
-
-        self._append_log(rec)
-        self._save_state()
-        self.prev_embed = emb
-
-        print(f"[{it}] {os.path.basename(img_path)} ({self.backend})")
-        print(f"    caption: {cap}")
-        if novelty_prev is not None:
-            print(f"    similarity_prev: {similarity_prev:.3f} | novelty_prev: {novelty_prev:.3f} | target: {self.world.novelty_target:.2f}")
-        print(f"    rule_change: {rule_change} | motifs_added: {len(rec.motifs_added)} | interior_strikes: {rec.interior_strikes}")
-
-def read_jsonl(path: str) -> List[Dict[str, Any]]:
-    if not os.path.exists(path):
-        return []
-    out: List[Dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            out.append(json.loads(line))
-    return out
-
-def load_embeddings(records: List[Dict[str, Any]]) -> np.ndarray:
-    embs: List[np.ndarray] = []
-    for r in records:
-        p = r.get("embedding_path", "")
-        if p and os.path.exists(p):
-            embs.append(np.load(p))
-        else:
-            embs.append(np.zeros((512,), dtype=np.float32))
-    return np.vstack(embs) if embs else np.zeros((0, 512), dtype=np.float32)
-
-def choose_k_by_silhouette(X: np.ndarray, kmin: int, kmax: int) -> int:
-    if X.shape[0] < (kmin + 2):
-        return max(2, min(kmin, X.shape[0])) if X.shape[0] >= 2 else 1
-    best_k = kmin
-    best_s = -1.0
-    upper = min(kmax, X.shape[0] - 1)
-    for k in range(kmin, upper + 1):
-        km = KMeans(n_clusters=k, n_init=10, random_state=42)
-        labels = km.fit_predict(X)
-        if len(set(labels)) < 2:
-            continue
-        s = silhouette_score(X, labels, metric="cosine")
-        if s > best_s:
-            best_s = s
-            best_k = k
-    return best_k
-
-def cluster_world(out_dir: str, kmin: int = 3, kmax: int = 10) -> str:
-    log_path = os.path.join(out_dir, "world_log.jsonl")
-    records = read_jsonl(log_path)
-    if not records:
-        raise RuntimeError("No world_log.jsonl found or empty.")
-    X = load_embeddings(records)
-    if X.shape[0] < 2:
-        raise RuntimeError("Not enough embeddings to cluster.")
-
-    k = choose_k_by_silhouette(X, kmin=kmin, kmax=kmax)
-    km = KMeans(n_clusters=max(2, k), n_init=10, random_state=42)
-    labels = km.fit_predict(X)
-
-    cluster_path = os.path.join(out_dir, "clusters.json")
-    payload = {"k": int(max(2, k)), "method": "kmeans_cosine_silhouette", "items": []}
-
-    for r, lab in zip(records, labels):
-        payload["items"].append({
-            "iteration": int(r["iteration"]),
-            "image_path": r["image_path"],
-            "caption": r["caption"],
-            "cluster": int(lab),
-            "ts": int(r["ts"]),
-            "novelty_prev": r.get("novelty_prev", None),
-        })
-
-    with open(cluster_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-
-    return cluster_path
-
-def make_contact_sheet(image_paths: List[str], out_path: str, title: str, thumb: int = 320, cols: int = 3) -> None:
-    imgs: List[Image.Image] = []
-    for p in image_paths:
-        try:
-            im = Image.open(p).convert("RGB")
-            imgs.append(im)
-        except Exception:
-            continue
-    if not imgs:
-        raise RuntimeError("No images for contact sheet.")
-
-    rows = int(math.ceil(len(imgs) / cols))
-    padding = 18
-    header = 96
-    w = cols * thumb + (cols + 1) * padding
-    h = header + rows * thumb + (rows + 1) * padding
-
-    sheet = Image.new("RGB", (w, h), (245, 245, 245))
-    draw = ImageDraw.Draw(sheet)
-
-    try:
-        font = ImageFont.truetype("arial.ttf", 28)
-        font_small = ImageFont.truetype("arial.ttf", 18)
-    except Exception:
-        font = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-
-    draw.text((padding, 18), title, fill=(0, 0, 0), font=font)
-    draw.text((padding, 58), f"n={len(imgs)}", fill=(30, 30, 30), font=font_small)
-
-    x0 = padding
-    y0 = header + padding
-    i = 0
-    for r in range(rows):
-        for c in range(cols):
-            if i >= len(imgs):
-                break
-            im = imgs[i].copy()
-            im.thumbnail((thumb, thumb))
-            x = x0 + c * (thumb + padding)
-            y = y0 + r * (thumb + padding)
-            bg = Image.new("RGB", (thumb, thumb), (255, 255, 255))
-            bx = (thumb - im.size[0]) // 2
-            by = (thumb - im.size[1]) // 2
-            bg.paste(im, (bx, by))
-            sheet.paste(bg, (x, y))
-            i += 1
-
-    sheet.save(out_path)
-
-def build_pdf(out_dir: str, clusters: Dict[str, Any], epochs: List[Dict[str, Any]]) -> str:
-    items = clusters["items"]
-    items = sorted(items, key=lambda x: x["iteration"])
-
-    atlas_dir = os.path.join(out_dir, "atlas")
-    sheets_dir = os.path.join(atlas_dir, "sheets")
-    ensure_dir(atlas_dir)
-    ensure_dir(sheets_dir)
-
-    sample_every = max(1, len(items) // 24)
-    timeline_imgs = [x["image_path"] for x in items[::sample_every]]
-    timeline_sheet = os.path.join(sheets_dir, "timeline.png")
-    make_contact_sheet(timeline_imgs, timeline_sheet, "RWE Atlas - Timeline (sampled)", thumb=320, cols=3)
-
-    by_cluster: Dict[int, List[Dict[str, Any]]] = {}
-    for it in items:
-        by_cluster.setdefault(int(it["cluster"]), []).append(it)
-
-    cluster_sheets: List[Tuple[str, str]] = []
-    for cl in sorted(by_cluster.keys()):
-        img_paths = [x["image_path"] for x in by_cluster[cl][:12]]
-        p = os.path.join(sheets_dir, f"cluster_{cl:02d}.png")
-        make_contact_sheet(img_paths, p, f"Cluster {cl:02d} (top {len(img_paths)})", thumb=320, cols=3)
-        cluster_sheets.append((f"Cluster {cl:02d}", p))
-
-    epoch_sheets: List[Tuple[Dict[str, Any], str]] = []
-    for e in epochs:
-        img_paths = [x["image_path"] for x in e["items"][:12]]
-        p = os.path.join(sheets_dir, f"epoch_{e['epoch_id']:02d}.png")
-        make_contact_sheet(img_paths, p, f"Epoch {e['epoch_id']:02d} (top {len(img_paths)})", thumb=320, cols=3)
-        epoch_sheets.append((e, p))
-
-    cluster_motifs: Dict[int, List[Tuple[str, int]]] = {}
-    for cl, arr in by_cluster.items():
-        caps = [x["caption"] for x in arr]
-        cluster_motifs[cl] = motif_counts_from_captions(caps, topn=12)
-
-    epoch_motifs: Dict[int, List[Tuple[str, int]]] = {}
-    for e in epochs:
-        caps = [x["caption"] for x in e["items"]]
-        epoch_motifs[int(e["epoch_id"])] = motif_counts_from_captions(caps, topn=12)
-
-    pdf_path = os.path.join(atlas_dir, "rwe_atlas_v04.pdf")
-    c = canvas.Canvas(pdf_path, pagesize=A4)
-    pw, ph = A4
-    margin = 15 * mm
-
-    c.setFont("Helvetica-Bold", 22)
-    c.drawString(margin, ph - 30*mm, "Reflective World Engine (RWE) - Atlas v0.4")
-    c.setFont("Helvetica", 12)
-    c.drawString(margin, ph - 40*mm, f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    c.drawString(margin, ph - 48*mm, f"Output dir: {out_dir}")
-    cfg_path = os.environ.get("RWE_CONFIG", "").strip()
-    if cfg_path:
-        c.drawString(margin, ph - 56*mm, f"Config: {cfg_path}")
-    c.drawString(margin, ph - 64*mm, f"Clustering: {clusters.get('method','')}, k={clusters.get('k','')}")
-    c.drawString(margin, ph - 72*mm, f"Epochs: {len(epochs)}")
-    c.showPage()
-
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(margin, ph - margin, "Motif Index - Epochs")
-    y = ph - margin - 18
-    c.setFont("Helvetica", 11)
-    for eid in sorted(epoch_motifs.keys()):
-        mot = epoch_motifs[eid]
-        line = f"Epoch {eid:02d}: " + ", ".join([f"{m}({n})" for m, n in mot])
-        for ln in wrap_lines(line, max_len=95):
-            c.drawString(margin, y, ln)
-            y -= 14
-            if y < 30*mm:
-                c.showPage()
-                c.setFont("Helvetica", 11)
-                y = ph - margin
-    c.showPage()
-
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(margin, ph - margin, "Motif Index - Clusters")
-    y = ph - margin - 18
-    c.setFont("Helvetica", 11)
-    for cl in sorted(cluster_motifs.keys()):
-        mot = cluster_motifs[cl]
-        line = f"Cluster {cl:02d}: " + ", ".join([f"{m}({n})" for m, n in mot])
-        for ln in wrap_lines(line, max_len=95):
-            c.drawString(margin, y, ln)
-            y -= 14
-            if y < 30*mm:
-                c.showPage()
-                c.setFont("Helvetica", 11)
-                y = ph - margin
-    c.showPage()
-
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(margin, ph - margin, "Timeline (sampled)")
-    avail_w = pw - 2 * margin
-    avail_h = ph - 2 * margin - 18
-    c.drawImage(timeline_sheet, margin, margin, width=avail_w, height=avail_h, preserveAspectRatio=True, anchor="c")
-    c.showPage()
-
-    for e, sheet_path in epoch_sheets:
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(margin, ph - margin, f"Epoch {e['epoch_id']:02d}: Iter {e['iteration_start']}-{e['iteration_end']} (n={e['size']})")
-        y = ph - margin - 22
-        c.setFont("Helvetica", 11)
-        tc = ", ".join([f"{cl}:{cnt}" for cl, cnt in e["top_clusters"]])
-        c.drawString(margin, y, f"Avg novelty: {e['avg_novelty']:.3f} | Top clusters: {tc}")
-        y -= 16
-
-        motifs = epoch_motifs[int(e["epoch_id"])]
-        motif_line = "Top motifs: " + ", ".join([f"{m}({n})" for m, n in motifs])
-        for ln in wrap_lines(motif_line, max_len=95):
-            c.drawString(margin, y, ln)
-            y -= 14
-
-        c.showPage()
-
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(margin, ph - margin, f"Epoch {e['epoch_id']:02d} contact sheet")
-        c.drawImage(sheet_path, margin, margin, width=avail_w, height=avail_h, preserveAspectRatio=True, anchor="c")
-        c.showPage()
-
-    for title, sp in cluster_sheets:
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(margin, ph - margin, f"{title} contact sheet")
-        c.drawImage(sp, margin, margin, width=avail_w, height=avail_h, preserveAspectRatio=True, anchor="c")
-        c.showPage()
-
-    c.save()
-    return pdf_path
-
-def main() -> None:
-    global SHOW_IMAGES
-    out_dir = os.environ.get("RWE_OUT", r".\outputs")
-    ensure_dir(out_dir)
-
-    hf_token = os.environ.get("HF_TOKEN", "").strip()
-    if hf_token:
-        try:
-            login(token=hf_token, add_to_git_credential=False)
-        except Exception:
-            pass
-
-    iters_s = os.environ.get("RWE_ITERS", "10").strip()
-    iters = int(iters_s) if iters_s.isdigit() else 10
-
-    SHOW_IMAGES = prompt_show_images()
-
-    print("")
-    print("RWE v0.4 loop starting (config-driven)")
-    backend_pref = os.environ.get("RWE_BACKEND", "auto").strip().lower() or "auto"
-    print(f"Backend preference: {backend_pref}")
-    print(f"Output: {out_dir}")
-    cfg_path = os.environ.get("RWE_CONFIG", "").strip()
-    if cfg_path:
-        print(f"Config: {cfg_path}")
-    print("")
-
-    rwe = RWEv04(out_dir=out_dir, genesis_url=GENESIS_URL, genesis_keywords=GENESIS_KEYWORDS)
-    print(f"Device: {rwe.device_backend}")
-    for _ in range(iters):
-        rwe.step()
-
-    print("")
-    print("Clustering + PDF...")
-    cluster_path = cluster_world(out_dir)
-    with open(cluster_path, "r", encoding="utf-8") as f:
-        clusters = json.load(f)
-    epochs = detect_epochs(clusters["items"], sustain=3, novelty_spike=0.40)
-    epochs_path = os.path.join(out_dir, "epochs.json")
-    with open(epochs_path, "w", encoding="utf-8") as f:
-        json.dump({"epochs": epochs}, f, ensure_ascii=False, indent=2)
-    pdf = build_pdf(out_dir, clusters, epochs)
-    print(f"Epochs JSON: {epochs_path}")
-    print(f"Atlas PDF: {pdf}")
-    print("")
-    print("Done.")
-
-if __name__ == "__main__":
-    main()
-'@ | Set-Content -Path $rwePy -Encoding UTF8
-
-    return $rwePy
-}
-
-function Write-RWE-ConfigEditor {
-    param([string]$AppDir)
-
-    Ensure-Folder $AppDir
-    $editorPy = Join-Path $AppDir "rwe_config_editor.py"
-
-@'
-import argparse
-import copy
-import json
-import os
-import sys
-import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
-
-LIST_SECTIONS = [
-    ("initial_words", "Initiale Motive"),
-    ("banned_motifs", "Gesperrte Motive"),
-    ("stopwords", "Stoppwörter"),
-    ("style_pool", "Stil-Pool"),
-    ("novelty_motif_pool", "Neuheits-Motiv-Pool"),
-    ("escape_motifs", "Escape-Motive"),
-]
-
-def load_json(path: str) -> dict:
-    if not path or not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f) or {}
-
-def ensure_section(cfg: dict, key: str) -> dict:
-    sec = cfg.get(key)
-    if not isinstance(sec, dict):
-        sec = {}
-        cfg[key] = sec
-    if "values" not in sec or not isinstance(sec["values"], list):
-        sec["values"] = []
-    return sec
-
-def text_to_list(text: str) -> list:
-    out = []
-    for line in text.splitlines():
-        val = line.strip()
-        if val:
-            out.append(val)
-    return out
-
-def list_to_text(values: list) -> str:
-    return "\n".join(values)
-
-def get_section_meta(cfg: dict, key: str) -> tuple:
-    sec = cfg.get(key, {})
-    desc = sec.get("description", "")
-    effects = sec.get("effects", [])
-    return desc, effects if isinstance(effects, list) else []
-
-def describe_section(cfg: dict, key: str) -> str:
-    desc, effects = get_section_meta(cfg, key)
-    lines = []
-    if desc:
-        lines.append(desc)
-    if effects:
-        lines.append("Wirkung:")
-        for e in effects:
-            lines.append(f"• {e}")
-    return "\n".join(lines)
-
-def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> None:
-    root = tk.Tk()
-    root.title("RWE Konfigurations-Editor")
-    root.geometry("900x720")
-    root.minsize(820, 620)
-
-    style = ttk.Style(root)
-    if "vista" in style.theme_names():
-        style.theme_use("vista")
-    elif "clam" in style.theme_names():
-        style.theme_use("clam")
-
-    main = ttk.Frame(root, padding=12)
-    main.pack(fill=tk.BOTH, expand=True)
-
-    header = ttk.Label(
-        main,
-        text="RWE Konfigurations-Editor",
-        font=("Segoe UI", 16, "bold"),
-    )
-    header.pack(anchor=tk.W, pady=(0, 4))
-
-    path_label = ttk.Label(
-        main,
-        text=f"Datei: {cfg_path}",
-        foreground="#555555",
-    )
-    path_label.pack(anchor=tk.W, pady=(0, 10))
-
-    notebook = ttk.Notebook(main)
-    notebook.pack(fill=tk.BOTH, expand=True)
-
-    list_widgets = {}
-
-    for key, title in LIST_SECTIONS:
-        frame = ttk.Frame(notebook, padding=12)
-        notebook.add(frame, text=title)
-
-        hint_text = describe_section(cfg if cfg else default_cfg, key)
-        hint_label = ttk.Label(frame, text=hint_text, wraplength=820, justify=tk.LEFT)
-        hint_label.pack(anchor=tk.W, pady=(0, 8))
-
-        helper = ttk.Label(frame, text="Ein Eintrag pro Zeile. Leerzeilen werden ignoriert.")
-        helper.pack(anchor=tk.W, pady=(0, 6))
-
-        text = scrolledtext.ScrolledText(frame, height=16, wrap=tk.WORD)
-        text.pack(fill=tk.BOTH, expand=True)
-        list_widgets[key] = text
-
-    runtime_frame = ttk.Frame(notebook, padding=12)
-    notebook.add(runtime_frame, text="Runtime Defaults")
-
-    runtime_hint = describe_section(cfg if cfg else default_cfg, "runtime_defaults")
-    runtime_label = ttk.Label(runtime_frame, text=runtime_hint, wraplength=820, justify=tk.LEFT)
-    runtime_label.pack(anchor=tk.W, pady=(0, 8))
-
-    runtime_row = ttk.Frame(runtime_frame)
-    runtime_row.pack(anchor=tk.W, pady=(4, 8))
-
-    iter_label = ttk.Label(runtime_row, text="Standard-Iterationen:")
-    iter_label.pack(side=tk.LEFT)
-
-    iter_var = tk.StringVar()
-    iter_entry = ttk.Entry(runtime_row, textvariable=iter_var, width=10)
-    iter_entry.pack(side=tk.LEFT, padx=(8, 0))
-
-    slideshow_frame = ttk.Frame(notebook, padding=12)
-    notebook.add(slideshow_frame, text="Slideshow")
-
-    slideshow_hint = describe_section(cfg if cfg else default_cfg, "slideshow")
-    slideshow_label = ttk.Label(slideshow_frame, text=slideshow_hint, wraplength=820, justify=tk.LEFT)
-    slideshow_label.pack(anchor=tk.W, pady=(0, 8))
-
-    slideshow_row = ttk.Frame(slideshow_frame)
-    slideshow_row.pack(anchor=tk.W, pady=(4, 8))
-
-    interval_label = ttk.Label(slideshow_row, text="Umschaltzeit (Sekunden):")
-    interval_label.pack(side=tk.LEFT)
-
-    interval_var = tk.StringVar()
-    interval_entry = ttk.Entry(slideshow_row, textvariable=interval_var, width=10)
-    interval_entry.pack(side=tk.LEFT, padx=(8, 0))
-
-    genesis_frame = ttk.Frame(notebook, padding=12)
-    notebook.add(genesis_frame, text="Genesis")
-
-    genesis_hint = describe_section(cfg if cfg else default_cfg, "genesis_image")
-    genesis_label = ttk.Label(genesis_frame, text=genesis_hint, wraplength=820, justify=tk.LEFT)
-    genesis_label.pack(anchor=tk.W, pady=(0, 8))
-
-    genesis_row = ttk.Frame(genesis_frame)
-    genesis_row.pack(anchor=tk.W, pady=(4, 8), fill=tk.X)
-
-    genesis_url_label = ttk.Label(genesis_row, text="Genesis-Bild URL:")
-    genesis_url_label.pack(side=tk.LEFT)
-
-    genesis_url_var = tk.StringVar()
-    genesis_url_entry = ttk.Entry(genesis_row, textvariable=genesis_url_var, width=60)
-    genesis_url_entry.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
-
-    genesis_kw_row = ttk.Frame(genesis_frame)
-    genesis_kw_row.pack(anchor=tk.W, pady=(4, 8))
-
-    genesis_kw_label = ttk.Label(genesis_kw_row, text="Max. Analyse-Keywords:")
-    genesis_kw_label.pack(side=tk.LEFT)
-
-    genesis_kw_var = tk.StringVar()
-    genesis_kw_entry = ttk.Entry(genesis_kw_row, textvariable=genesis_kw_var, width=10)
-    genesis_kw_entry.pack(side=tk.LEFT, padx=(8, 0))
-
-    def load_into_fields(source_cfg: dict) -> None:
-        for key, _ in LIST_SECTIONS:
-            sec = ensure_section(source_cfg, key)
-            text = list_widgets[key]
-            text.delete("1.0", tk.END)
-            text.insert(tk.END, list_to_text(sec.get("values", [])))
-
-        runtime_sec = source_cfg.get("runtime_defaults", {})
-        values = runtime_sec.get("values", {}) if isinstance(runtime_sec, dict) else {}
-        iter_val = values.get("iterations", 10)
-        iter_var.set(str(iter_val))
-
-        slideshow_sec = source_cfg.get("slideshow", {})
-        slideshow_values = slideshow_sec.get("values", {}) if isinstance(slideshow_sec, dict) else {}
-        interval_val = slideshow_values.get("interval_seconds", 5)
-        interval_var.set(str(interval_val))
-
-        genesis_sec = source_cfg.get("genesis_image", {})
-        genesis_values = genesis_sec.get("values", {}) if isinstance(genesis_sec, dict) else {}
-        genesis_url = genesis_values.get("url", "")
-        genesis_kw = genesis_values.get("analysis_keywords", 12)
-        genesis_url_var.set("" if genesis_url is None else str(genesis_url))
-        genesis_kw_var.set(str(genesis_kw))
-
-    def handle_open_outputs() -> None:
-        if not outputs_dir:
-            messagebox.showinfo("Ausgabeordner", "Kein Ausgabeordner bekannt.")
-            return
-        if not os.path.exists(outputs_dir):
-            messagebox.showwarning("Ausgabeordner", "Der Ausgabeordner existiert noch nicht.")
-            return
-        try:
-            os.startfile(outputs_dir)
-        except Exception as exc:
-            messagebox.showerror("Ausgabeordner", f"Konnte Ordner nicht öffnen:\n{exc}")
-
-    def handle_restore_defaults() -> None:
-        load_into_fields(default_cfg)
-
-    def handle_save() -> None:
-        updated = copy.deepcopy(cfg)
-        for key, _ in LIST_SECTIONS:
-            sec = ensure_section(updated, key)
-            values = text_to_list(list_widgets[key].get("1.0", tk.END))
-            if not values:
-                messagebox.showerror("Fehler", f"'{key}' darf nicht leer sein.")
-                return
-            sec["values"] = values
-
-        runtime_sec = updated.setdefault("runtime_defaults", {})
-        if not isinstance(runtime_sec, dict):
-            runtime_sec = {}
-            updated["runtime_defaults"] = runtime_sec
-        runtime_values = runtime_sec.setdefault("values", {})
-        if not isinstance(runtime_values, dict):
-            runtime_values = {}
-            runtime_sec["values"] = runtime_values
-
-        iter_text = iter_var.get().strip()
-        if not iter_text.isdigit() or int(iter_text) < 1:
-            messagebox.showerror("Fehler", "Bitte eine gültige positive Zahl für Iterationen eingeben.")
-            return
-        runtime_values["iterations"] = int(iter_text)
-
-        slideshow_sec = updated.setdefault("slideshow", {})
-        if not isinstance(slideshow_sec, dict):
-            slideshow_sec = {}
-            updated["slideshow"] = slideshow_sec
-        slideshow_values = slideshow_sec.setdefault("values", {})
-        if not isinstance(slideshow_values, dict):
-            slideshow_values = {}
-            slideshow_sec["values"] = slideshow_values
-
-        interval_text = interval_var.get().strip().replace(",", ".")
-        try:
-            interval_val = float(interval_text)
-        except ValueError:
-            messagebox.showerror("Fehler", "Bitte eine gültige Zahl für die Umschaltzeit eingeben.")
-            return
-        if interval_val <= 0:
-            messagebox.showerror("Fehler", "Die Umschaltzeit muss größer als 0 sein.")
-            return
-        slideshow_values["interval_seconds"] = interval_val
-
-        genesis_sec = updated.setdefault("genesis_image", {})
-        if not isinstance(genesis_sec, dict):
-            genesis_sec = {}
-            updated["genesis_image"] = genesis_sec
-        genesis_values = genesis_sec.setdefault("values", {})
-        if not isinstance(genesis_values, dict):
-            genesis_values = {}
-            genesis_sec["values"] = genesis_values
-
-        genesis_values["url"] = genesis_url_var.get().strip()
-
-        genesis_kw_text = genesis_kw_var.get().strip()
-        if genesis_kw_text:
-            if not genesis_kw_text.isdigit() or int(genesis_kw_text) < 1:
-                messagebox.showerror("Fehler", "Bitte eine gültige positive Zahl für Analyse-Keywords eingeben.")
-                return
-            genesis_values["analysis_keywords"] = int(genesis_kw_text)
-
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(updated, f, ensure_ascii=False, indent=2)
-
-        messagebox.showinfo("Gespeichert", "Konfiguration wurde gespeichert.")
-        root.destroy()
-
-    load_into_fields(cfg)
-
-    buttons = ttk.Frame(main)
-    buttons.pack(fill=tk.X, pady=(10, 0))
-
-    open_btn = ttk.Button(buttons, text="Ausgabeordner öffnen", command=handle_open_outputs)
-    open_btn.pack(side=tk.LEFT)
-
-    restore_btn = ttk.Button(buttons, text="Defaults wiederherstellen", command=handle_restore_defaults)
-    restore_btn.pack(side=tk.LEFT, padx=(8, 0))
-
-    cancel_btn = ttk.Button(buttons, text="Abbrechen", command=root.destroy)
-    cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
-
-    save_btn = ttk.Button(buttons, text="Speichern & Schließen", command=handle_save)
-    save_btn.pack(side=tk.RIGHT)
-
-    root.mainloop()
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--defaults", required=False)
-    parser.add_argument("--outputs", required=False, default="")
-    args = parser.parse_args()
-
-    cfg = load_json(args.config)
-    default_cfg = load_json(args.defaults) if args.defaults else {}
-    if not default_cfg:
-        default_cfg = copy.deepcopy(cfg)
-
-    if not cfg:
-        cfg = copy.deepcopy(default_cfg)
-
-    build_ui(args.config, default_cfg, cfg, args.outputs or "")
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
-'@ | Set-Content -Path $editorPy -Encoding UTF8
-
-    return $editorPy
+    $missing = @()
+    $req = @("rwe_v04.py","rwe_config_editor.py","rwe_slideshow.py","rwe_launcher.py")
+    foreach ($f in $req) {
+        $p = Join-Path $AppDir $f
+        if (-not (Test-Path -LiteralPath $p)) { $missing += $f }
+    }
+
+    if ($missing.Count -gt 0) { throw ("Missing required file(s) in app folder: {0}" -f ($missing -join ", ")) }
 }
 
 function Write-RunSlideshowStarter {
-    param([string]$RunRoot)
+    param([string]$RunRoot, [string]$AppDir)
 
     $starterPath = Join-Path $RunRoot "start_slideshow.ps1"
+    $slideshowPy = Join-Path $AppDir "rwe_slideshow.py"
 
-@'
+@"
 Set-StrictMode -Version 2
-$ErrorActionPreference = "Stop"
+`$ErrorActionPreference = "Stop"
 
 function Resolve-PythonExe {
-    param([string]$RunRoot)
-    $scriptDir = Split-Path -Parent (Split-Path -Parent $RunRoot)
-    $venvPy = Join-Path $scriptDir "venv\Scripts\python.exe"
-    if (Test-Path -LiteralPath $venvPy) { return $venvPy }
-    $cmd = Get-Command "python" -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source) { return $cmd.Source }
-    return $null
+    param([string]`$RunRoot)
+    `$scriptDir = Split-Path -Parent (Split-Path -Parent `$RunRoot)
+    `$venvPy = Join-Path `$scriptDir "venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath `$venvPy) { return `$venvPy }
+    `$cmd = Get-Command "python" -ErrorAction SilentlyContinue
+    if (`$cmd -and `$cmd.Source) { return `$cmd.Source }
+    return `$null
 }
 
-$runRoot = $PSScriptRoot
-$py = Resolve-PythonExe -RunRoot $runRoot
-if (-not $py) {
+`$runRoot = `$PSScriptRoot
+`$py = Resolve-PythonExe -RunRoot `$runRoot
+if (-not `$py) {
     Write-Host "Python nicht gefunden. Bitte zuerst rwe_runner.ps1 ausführen." -ForegroundColor Red
     Read-Host "Enter drücken zum Beenden"
     exit 1
 }
 
-$slideshowPy = Join-Path $runRoot "rwe_slideshow.py"
-if (-not (Test-Path -LiteralPath $slideshowPy)) {
-@"
-import argparse
-import json
-import os
-import sys
-from typing import List
-
-from PIL import Image, ImageTk
-import tkinter as tk
-
-
-def load_interval(cfg_path: str, default: float = 5.0) -> float:
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f) or {}
-    except Exception:
-        return default
-
-    slideshow = cfg.get("slideshow", {}) if isinstance(cfg, dict) else {}
-    values = slideshow.get("values", {}) if isinstance(slideshow, dict) else {}
-    interval = values.get("interval_seconds", default)
-    try:
-        interval_val = float(interval)
-    except (TypeError, ValueError):
-        return default
-    return interval_val if interval_val > 0 else default
-
-
-def collect_images(out_dir: str) -> List[str]:
-    if not os.path.isdir(out_dir):
-        return []
-    images = [
-        os.path.join(out_dir, name)
-        for name in os.listdir(out_dir)
-        if name.lower().endswith(".png")
-    ]
-    return sorted(images)
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run-root", required=True)
-    args = parser.parse_args()
-
-    run_root = args.run_root
-    out_dir = os.path.join(run_root, "outputs")
-    cfg_path = os.path.join(run_root, "rwe_config.json")
-
-    interval = load_interval(cfg_path)
-    images = collect_images(out_dir)
-    if not images:
-        print("Keine PNG-Bilder im Ausgabeordner gefunden.")
-        return 1
-
-    root = tk.Tk()
-    root.configure(background="black")
-    root.attributes("-fullscreen", True)
-    root.attributes("-topmost", True)
-    root.focus_force()
-
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-
-    label = tk.Label(root, bg="black")
-    label.pack(expand=True, fill="both")
-
-    state = {"idx": 0}
-
-    def close(_event=None) -> None:
-        root.destroy()
-
-    def show_next() -> None:
-        path = images[state["idx"]]
-        img = Image.open(path).convert("RGB")
-        img.thumbnail((sw, sh), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(img)
-        label.configure(image=photo)
-        label.image = photo
-        state["idx"] = (state["idx"] + 1) % len(images)
-        root.after(int(interval * 1000), show_next)
-
-    root.bind("<Escape>", close)
-    root.bind("<Return>", close)
-    root.bind("<space>", close)
-    root.bind("<Button-1>", close)
-
-    show_next()
-    root.mainloop()
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-"@ | Set-Content -LiteralPath $slideshowPy -Encoding UTF8
+`$slideshowPy = `"$slideshowPy`"
+if (-not (Test-Path -LiteralPath `$slideshowPy)) {
+    Write-Host "rwe_slideshow.py nicht gefunden: `$slideshowPy" -ForegroundColor Red
+    Read-Host "Enter drücken zum Beenden"
+    exit 1
 }
 
-& $py $slideshowPy --run-root $runRoot
-'@ | Set-Content -LiteralPath $starterPath -Encoding UTF8
+& `$py `$slideshowPy --run-root `$runRoot
+"@ | Set-Content -LiteralPath $starterPath -Encoding UTF8
 
     return $starterPath
 }
 
 try {
     Assert-Or-Elevate
+    Minimize-ConsoleWindow
 
     $scriptPath = Get-ScriptPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) { throw "This script must be saved as a .ps1 file." }
     $scriptDir = Get-ScriptDir
     if ([string]::IsNullOrWhiteSpace($scriptDir)) { throw "Could not determine script directory." }
 
-    $configPath = Join-Path $scriptDir "rwe_config.json"
+    $loadingUi = $null
 
-    if (-not (Test-Path -LiteralPath $configPath)) {
-        throw "Missing rwe_config.json next to this ps1."
-    }
+    $configPath = Join-Path $scriptDir "rwe_config.json"
+    if (-not (Test-Path -LiteralPath $configPath)) { throw "Missing rwe_config.json next to this ps1." }
+
+    $appDir   = Join-Path $scriptDir "app"
+    $cacheDir = Join-Path $scriptDir "cache"
+    $venvDir  = Join-Path $scriptDir "venv"
+
+    Ensure-Folder $appDir
+    Ensure-Folder $cacheDir
+
+    Assert-AppFiles -AppDir $appDir
 
     Write-Section "Validate config"
     Validate-Config -ConfigPath $configPath
     Write-Host "Config OK." -ForegroundColor Green
 
     Write-Section "Resume mode"
-    $doResume = Prompt-YesNo -Label "Resume previous run?" -DefaultNo $true
     $runRoot = $null
-    if ($doResume) {
-        $latest = Find-LatestRunFolder -ScriptDir $scriptDir
-        if ([string]::IsNullOrWhiteSpace($latest)) {
-            Write-Host "No previous run folder found. Starting a new run." -ForegroundColor Yellow
-            $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
-        } else {
-            $runRoot = Prompt-Path -Label "Run folder to resume" -DefaultValue $latest
-        }
-    } else {
+    $latest = Find-LatestRunFolder -ScriptDir $scriptDir
+    if ([string]::IsNullOrWhiteSpace($latest)) {
+        Write-Host "No previous run folder found. Starting a new run." -ForegroundColor Yellow
         $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
+    } else {
+        $runRoot = $latest
+        Write-Host "Previous run folder found. Resuming latest run." -ForegroundColor Green
     }
 
     Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
 
-    $appDir   = Join-Path $scriptDir "app"
-    $cacheDir = Join-Path $scriptDir "cache"
-    $venvDir  = Join-Path $scriptDir "venv"
-    $outDir   = Join-Path $runRoot "outputs"
-
-    Ensure-Folder $appDir
-    Ensure-Folder $cacheDir
+    $outDir = Join-Path $runRoot "outputs"
     Ensure-Folder $outDir
 
     $runConfig = Join-Path $runRoot "rwe_config.json"
-    if (-not (Test-Path -LiteralPath $runConfig)) {
-        Copy-FileSafe -Src $configPath -Dst $runConfig
-    }
+    if (-not (Test-Path -LiteralPath $runConfig)) { Copy-FileSafe -Src $configPath -Dst $runConfig }
 
-    Write-RunSlideshowStarter -RunRoot $runRoot
+    Write-RunSlideshowStarter -RunRoot $runRoot -AppDir $appDir | Out-Null
 
     $env:HF_HOME = $cacheDir
 
     Write-Section "Install prerequisites (Python 3.10, Git)"
     Install-Python310
+    if (Test-UiAbort -Proc $loadingUi) { return }
     Install-Git
+    if (Test-UiAbort -Proc $loadingUi) { return }
+
+    $progressFile = Join-Path $runRoot "bootstrap_progress.jsonl"
+    try { Remove-Item -LiteralPath $progressFile -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
+
+    $tokenFile = Join-Path $runRoot "hf_token.json"
+    $loadingUi = Start-LoadingUi -ProgressFile $progressFile -AppDir $appDir -TokenFile $tokenFile
+    if (Test-UiAbort -Proc $loadingUi) { return }
+
+    Write-ProgressEvent -ProgressFile $progressFile -Percent 5 -Message "Prerequisites ready" -Phase "bootstrap"
 
     Write-Section "Create venv (Python 3.10)"
+    Write-ProgressEvent -ProgressFile $progressFile -Percent 10 -Message "Creating or validating venv" -Phase "venv"
     $venvInfo = Ensure-Venv310 -VenvPath $venvDir
+    if (Test-UiAbort -Proc $loadingUi) { return }
+
     $py  = $venvInfo.Py
     $pip = $venvInfo.Pip
 
+    Write-ProgressEvent -ProgressFile $progressFile -Percent 20 -Message "Venv ready" -Phase "venv"
+
     Write-Section "Install packages"
+    Write-ProgressEvent -ProgressFile $progressFile -Percent 25 -Message "Detecting hardware" -Phase "packages"
     Write-DetectedHardwareInfo
-    $backend = Get-PreferredBackend
-    Write-Host ("Selected backend (pre-check): {0}" -f $backend) -ForegroundColor Cyan
 
-    Install-TorchForBackend -PipPath $pip -Backend $backend
+    $preferred = Get-PreferredBackend
+    Write-Host ("Selected backend (pre-check): {0}" -f $preferred) -ForegroundColor Cyan
 
-    $verify = Test-BackendInPython -PythonPath $py -Backend $backend
-    if ($verify -ne 0) {
-        if ($backend -eq "cuda") {
+    $backend = $preferred
+    $st = Get-TorchStatus -PythonPath $py
+
+    if ($backend -eq "cuda") {
+        if (-not ($st.has_torch -and $st.cuda_available)) {
+            Install-TorchStack -PipPath $pip -PythonPath $py -Backend "cuda"
+        }
+        $verify = Test-BackendInPython -PythonPath $py -Backend "cuda"
+        if ($verify -ne 0) {
             Write-Host "CUDA verify failed. Falling back to DirectML..." -ForegroundColor Yellow
             $backend = "directml"
-            Install-TorchForBackend -PipPath $pip -Backend $backend
-            $verify = Test-BackendInPython -PythonPath $py -Backend $backend
         }
-        if ($verify -ne 0) {
-            Write-Host "DirectML verify failed. Falling back to CPU..." -ForegroundColor Yellow
-            $backend = "cpu"
-            Install-TorchForBackend -PipPath $pip -Backend $backend
-            $verify = Test-BackendInPython -PythonPath $py -Backend $backend
+    }
+
+    if ($backend -eq "directml") {
+        $st = Get-TorchStatus -PythonPath $py
+        if ($st.has_directml) {
+            $verify = Test-BackendInPython -PythonPath $py -Backend "directml"
+            if ($verify -ne 0) {
+                Write-Host "DirectML verify failed. Falling back to CPU..." -ForegroundColor Yellow
+                $backend = "cpu"
+            }
+        } else {
+            if ($st.has_torch) {
+                Write-Host "Torch is already installed. Skipping DirectML install to avoid changing the existing environment. Using CPU backend." -ForegroundColor Yellow
+                $backend = "cpu"
+            } else {
+                Install-TorchStack -PipPath $pip -PythonPath $py -Backend "directml"
+                $verify = Test-BackendInPython -PythonPath $py -Backend "directml"
+                if ($verify -ne 0) {
+                    Write-Host "DirectML verify failed. Falling back to CPU..." -ForegroundColor Yellow
+                    $backend = "cpu"
+                }
+            }
         }
+    }
+
+    if ($backend -eq "cpu") {
+        $st = Get-TorchStatus -PythonPath $py
+        if (-not $st.has_torch) { Install-TorchStack -PipPath $pip -PythonPath $py -Backend "cpu" }
+        $verify = Test-BackendInPython -PythonPath $py -Backend "cpu" | Out-Null
     }
 
     Write-Host ("Selected backend (verified): {0}" -f $backend) -ForegroundColor Green
     $env:RWE_BACKEND = $backend
 
+    Write-ProgressEvent -ProgressFile $progressFile -Percent 55 -Message "Installing Python packages" -Phase "packages"
     Install-Pip-Packages -PipPath $pip
+    if (Test-UiAbort -Proc $loadingUi) { return }
 
-    Write-Section "Write RWE Python"
-    $rwePy = Write-RWE-Python -AppDir $appDir
-    $editorPy = Write-RWE-ConfigEditor -AppDir $appDir
+    $rwePy      = Join-Path $appDir "rwe_v04.py"
+    $editorPy   = Join-Path $appDir "rwe_config_editor.py"
+    $prefetchPy = Join-Path $appDir "rwe_prefetch_models.py"
 
-    Write-Section "Config editor"
-    $editConfig = Prompt-YesNo -Label "Konfiguration jetzt bearbeiten?" -DefaultNo $true
-    if ($editConfig) {
-        & $py $editorPy --config $runConfig --defaults $configPath --outputs $outDir
-        Write-Section "Validate config"
-        Validate-Config -ConfigPath $runConfig
-        Write-Host "Config OK." -ForegroundColor Green
+    Apply-HFTokenFromFile -TokenFile $tokenFile
+
+    Write-ProgressEvent -ProgressFile $progressFile -Percent 70 -Message "Prefetching models (downloads happen here)" -Phase "prefetch"
+    if (Test-Path -LiteralPath $prefetchPy) {
+        $env:RWE_PROGRESS = $progressFile
+        & $py $prefetchPy --progress $progressFile
+        if (Test-Path Env:\RWE_PROGRESS) { Remove-Item Env:\RWE_PROGRESS -ErrorAction SilentlyContinue }
     }
 
+    Write-ProgressEvent -ProgressFile $progressFile -Percent 90 -Message "Opening config editor" -Phase "bootstrap" -Close
+    Stop-LoadingUi -Proc $loadingUi
+
+    Write-Section "Config editor"
+    $pyw = Join-Path $venvDir "Scripts\pythonw.exe"
+    $cfgExit = 0
+    if (Test-Path -LiteralPath $pyw) { & $pyw $editorPy --config $runConfig --defaults $configPath --outputs $outDir; $cfgExit = $LASTEXITCODE }
+    else { & $py $editorPy --config $runConfig --defaults $configPath --outputs $outDir; $cfgExit = $LASTEXITCODE }
+    if ($cfgExit -ne 0) { Write-Host "Config editor was closed. Exiting." -ForegroundColor Yellow; return }
+
+    Write-Section "Validate config"
+    Validate-Config -ConfigPath $runConfig
+    Write-Host "Config OK." -ForegroundColor Green
+
     Write-Section "Run settings"
-    $defaultIters = Read-ConfigDefaultIterations -ConfigPath $runConfig -Fallback 10
-    $iters = Prompt-Int -Label "Iterations" -DefaultValue $defaultIters
+    $iters = Read-ConfigDefaultIterations -ConfigPath $runConfig -Fallback 10
 
-    $token = Read-Host "Hugging Face token (optional - press Enter to skip)"
-    if (-not [string]::IsNullOrWhiteSpace($token)) { $env:HF_TOKEN = $token.Trim() }
-
-    $env:RWE_CONFIG = $runConfig
-    $env:RWE_OUT    = $outDir
-    $env:RWE_ITERS  = [string]$iters
+    $env:RWE_CONFIG  = $runConfig
+    $env:RWE_OUT     = $outDir
+    $env:RWE_ITERS   = [string]$iters
 
     Write-Section "Start"
     Write-Host ("Python: {0}" -f $py) -ForegroundColor Green
@@ -2181,8 +991,8 @@ try {
     } else {
         Write-Host "PDF not found (generation failed or path changed)." -ForegroundColor Yellow
     }
-
-    Wait-ForEnter "Press Enter to exit..."
 } catch {
     Show-ErrorAndWait "Fatal error." $_.Exception
+} finally {
+    try { Stop-LoadingUi -Proc $loadingUi } catch { }
 }

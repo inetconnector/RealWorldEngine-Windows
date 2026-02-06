@@ -1,0 +1,229 @@
+{
+  "meta": {
+    "name": "RWE v0.4 Konfiguration",
+    "version": 1,
+    "notes": "Alle Motiv-Pools und Startwerte werden hier konfiguriert. Die Erklärungen sind als JSON-Felder enthalten, sodass die Datei gültiges JSON bleibt."
+  },
+  "initial_words": {
+    "description": "Initiale Startmotive, die zum Aufbau der ersten Prompts verwendet werden. Sie beeinflussen die frühen Iterationen stark und können die gesamte Serie prägen, da spätere Motive aus Bildbeschreibungen gelernt werden.",
+    "effects": [
+      "Steuert die frühe ästhetische Richtung der Serie",
+      "Bei zu generischen Motiven kann die Serie zu allgemeinen Modell-Prioren driften",
+      "Bei zu spezifischen Motiven kann die Serie repetitiv werden"
+    ],
+    "values": [
+      "Spiegel",
+      "Archiv",
+      "Schwelle",
+      "Glyphe",
+      "Schleife",
+      "Schatten"
+    ]
+  },
+  "banned_motifs": {
+    "description": "Harte Blacklist von Motiven, die nicht in die wachsende Motivbank gelangen dürfen. Diese Begriffe korrelieren mit der sogenannten „Flur- / Innenraumfalle“ und eintöniger Geometrie.",
+    "effects": [
+      "Verhindert, dass das System Innenraum- oder Flurhinweise aus Bildbeschreibungen lernt",
+      "Reduziert wiederholte Korridore, Räume, Wände, Böden und Möbel",
+      "Hilft zu vermeiden, dass monotone Farbreize wie „weiß / grau / schwarz“ dominieren"
+    ],
+    "values": [
+      "Raum",
+      "Räume",
+      "Flur",
+      "Korridor",
+      "Wand",
+      "Wände",
+      "Decke",
+      "Boden",
+      "Böden",
+      "Tür",
+      "Türen",
+      "Fenster",
+      "Innenraum",
+      "innen",
+      "Halle",
+      "weiß",
+      "schwarz",
+      "grau",
+      "lang",
+      "dunkel",
+      "hell",
+      "Tisch",
+      "Stuhl",
+      "Stühle",
+      "Bett",
+      "Sofa",
+      "Teppich",
+      "Fliese",
+      "Fliesen",
+      "Ecke",
+      "Ecken"
+    ]
+  },
+  "stopwords": {
+    "description": "Wörter, die bei der Extraktion von Schlüsselbegriffen aus Bildbeschreibungen herausgefiltert werden. Dadurch werden Grammatikwörter und generische Bildbegriffe entfernt, sodass nur bedeutungstragende Motive übrig bleiben. Diese Liste wird intern mit banned_motifs vereinigt.",
+    "effects": [
+      "Hält die gelernte Motivbank sauber und präzise",
+      "Verhindert das Lernen von generischem Rauschen wie „Foto“, „Bild“ oder „darstellend“",
+      "Verbessert die Motivvielfalt durch Fokus auf inhaltliche Begriffe"
+    ],
+    "values": [
+      "ein",
+      "eine",
+      "der",
+      "die",
+      "das",
+      "und",
+      "oder",
+      "aber",
+      "mit",
+      "ohne",
+      "von",
+      "in",
+      "auf",
+      "an",
+      "zu",
+      "aus",
+      "ist",
+      "sind",
+      "war",
+      "waren",
+      "sein",
+      "gewesen",
+      "seiend",
+      "als",
+      "durch",
+      "für",
+      "in hinein",
+      "über",
+      "unter",
+      "dies",
+      "das",
+      "diese",
+      "jene",
+      "es",
+      "sein",
+      "ihr",
+      "dein",
+      "unser",
+      "mein",
+      "Bild",
+      "Abbildung",
+      "Szene",
+      "Fotografie",
+      "Foto",
+      "Illustration",
+      "Kunst",
+      "Gemälde",
+      "zeigend",
+      "zeigt",
+      "stellt dar",
+      "darstellend",
+      "dort",
+      "hier"
+    ]
+  },
+  "style_pool": {
+    "description": "Rotierende Liste von Stilbausteinen, die an den Prompt angehängt werden. Die Stilrotation verhindert lokale Minima (immer gleiche Kompositionen), während die Kohärenz erhalten bleibt.",
+    "effects": [
+      "Fügt kontrollierte Variation hinzu, ohne die Kernmotive zu verändern",
+      "Kann das Modell in Richtung Außenräume, Makroansichten oder diagrammartige Darstellungen lenken",
+      "Bei zu starker Rotation kann die Gesamtkohärenz abnehmen"
+    ],
+    "values": [
+      "sonnendurchflutetes Außenmotiv, Weitwinkel, große Tiefenschärfe, filmische Komposition",
+      "neblige Landschaft, monumentaler Maßstab, atmosphärische Perspektive, filmische Komposition",
+      "Makrofotografie, extreme Detailtiefe, geringe Tiefenschärfe, Studioausleuchtung",
+      "isometrisches Diagramm, klare Geometrie, technische Illustration, hohe Detailtreue",
+      "surreale Naturgeschichte, Präparatdarstellung, archivale Beschriftungen entfernt, hohe Detailtreue",
+      "biomechanischer Skulpturengarten, dramatische Beleuchtung, hohe Detailtreue"
+    ]
+  },
+  "novelty_motif_pool": {
+    "description": "Motive, die als „Neuheitsinjektionen“ verwendet werden, wenn die Serie der vorherigen Iteration zu ähnlich wird. Sie erzwingen gezielte Exploration.",
+    "effects": [
+      "Durchbricht Wiederholungsschleifen",
+      "Eröffnet neue semantische Richtungen",
+      "Zu häufige Injektionen können die Kohärenz verringern"
+    ],
+    "values": [
+      "Gezeitenbecken",
+      "Kathedralwald",
+      "Glaswüste",
+      "Moosbibliothek",
+      "schwebendes Reliquiar",
+      "Votivmaschine",
+      "Wetterorakel",
+      "kryptische Fauna",
+      "Chor der Steine",
+      "Astralkarte",
+      "Tintenozean",
+      "mechanische Blüte",
+      "Myzelatlas",
+      "Palimpsest",
+      "Sternbild",
+      "Chiffre",
+      "Mnemonik",
+      "Orakel",
+      "Index",
+      "Relikt",
+      "Diagramm",
+      "Schema",
+      "Linse",
+      "Horizont"
+    ]
+  },
+  "escape_motifs": {
+    "description": "Motive, die eingesetzt werden, wenn das System eine „Innenraumfalle“ erkennt. Sie verschieben die Szene nach außen und hin zu offenen Kompositionen.",
+    "effects": [
+      "Wirkt aktiv gegen Innenraum- und Flurattraktoren",
+      "Verschiebt Kompositionen in Richtung Himmel, Landschaft oder Ruinen",
+      "Lässt sich gut mit Stilrotation kombinieren"
+    ],
+    "values": [
+      "offener Himmel",
+      "Gebirgskamm",
+      "Flussdelta",
+      "Küstenklippen",
+      "Wüstenmonolith",
+      "Sturmfront",
+      "Sonnenstrahl",
+      "wilde Wiese",
+      "Riesenstatue",
+      "Ruinen"
+    ]
+  },
+  "genesis_image": {
+    "description": "Optionales Startbild (URL). Wird vor Iteration 1 geladen, analysiert und als Genesis-Eintrag in die Logdatei geschrieben.",
+    "effects": [
+      "Erzeugt eine detaillierte Analyse (Beschreibung, Schlüsselbegriffe, Farben, Statistiken)",
+      "Seedet die Motivbank mit erkannten Begriffen",
+      "Dient als Referenz-Embedding für die erste Iteration"
+    ],
+    "values": {
+      "url": "",
+      "analysis_keywords": 12
+    }
+  },
+  "slideshow": {
+    "description": "Konfiguration für die Slideshow im Run-Ordner.",
+    "effects": [
+      "Legt das automatische Umschaltintervall der Bilder fest",
+      "Wird von start_slideshow.ps1 im Run-Ordner gelesen"
+    ],
+    "values": {
+      "interval_seconds": 15
+    }
+  },
+  "runtime_defaults": {
+    "description": "Standardwerte, die vom Runner verwendet werden, wenn sie nicht interaktiv überschrieben werden.",
+    "effects": [
+      "Bequeme Defaults für reproduzierbare Runs",
+      "Iterationen und Hugging-Face-Token können weiterhin interaktiv geändert werden"
+    ],
+    "values": {
+      "iterations": 30
+    }
+  }
+}
