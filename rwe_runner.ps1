@@ -834,17 +834,8 @@ try {
         Write-Host "No previous run folder found. Starting a new run." -ForegroundColor Yellow
         $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
     } else {
-<<<<<<< HEAD
         $runRoot = $latest
         Write-Host "Previous run folder found. Resuming latest run." -ForegroundColor Green
-=======
-        $doResume = Prompt-YesNo -Label "Resume previous run?" -DefaultNo $true
-        if ($doResume) {
-            $runRoot = Prompt-Path -Label "Run folder to resume" -DefaultValue $latest
-        } else {
-            $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
-        }
->>>>>>> a0520620dbf9649ee3e897935923cb2d758d722f
     }
 
     Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
