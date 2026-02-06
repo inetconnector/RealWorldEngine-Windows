@@ -225,7 +225,61 @@
       "You can still override iterations and HF token interactively"
     ],
     "values": {
-      "iterations": 10
+      "iterations": 30,
+      "width": 1024,
+      "height": 1024,
+      "size_preset": "standard_square"
     }
+  },
+  "image_sizes": {
+    "description": "Selectable image size presets for generation.",
+    "effects": [
+      "Controls the generated image resolution (width/height).",
+      "Larger sizes need more VRAM and can be slower."
+    ],
+    "values": [
+      {
+        "id": "standard_square",
+        "label": "Standard (Square)",
+        "width": 1024,
+        "height": 1024,
+        "use": "Balanced / default"
+      },
+      {
+        "id": "tshirt_square",
+        "label": "T-Shirt / Sticker (Square)",
+        "width": 1536,
+        "height": 1536,
+        "use": "More detail; may be heavier"
+      },
+      {
+        "id": "portrait_3_4",
+        "label": "Poster Portrait (3:4)",
+        "width": 832,
+        "height": 1216,
+        "use": "SDXL-friendly portrait"
+      },
+      {
+        "id": "landscape_4_3",
+        "label": "Poster Landscape (4:3)",
+        "width": 1216,
+        "height": 832,
+        "use": "SDXL-friendly landscape"
+      },
+      {
+        "id": "portrait_a_like",
+        "label": "Art Print Portrait (2:3)",
+        "width": 1024,
+        "height": 1536,
+        "use": "Tall prints"
+      },
+      {
+        "id": "landscape_3_2",
+        "label": "Art Print Landscape (3:2)",
+        "width": 1536,
+        "height": 1024,
+        "use": "Wide prints"
+      }
+    ]
   }
 }

@@ -19,3 +19,4 @@ cache/
 __pycache__/
 *.pyc
 *.log
+bootstrap_progress.jsonl

@@ -556,12 +556,26 @@ function Install-Pip-Packages {
 
     function Get-PipPackageVersion {
         param([string]$PythonPath, [string]$Name)
-        $out = & $PythonPath -m pip show $Name 2>$null
+        $code = @'
+import sys
+try:
+    from importlib import metadata
+except Exception:
+    metadata = None
+
+name = sys.argv[1]
+if metadata is None:
+    sys.exit(1)
+
+try:
+    v = metadata.version(name)
+    sys.stdout.write(v)
+except Exception:
+    sys.exit(2)
+'@
+        $out = & $PythonPath -c $code $Name 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
-        foreach ($line in $out) {
-            if ($line -match '^Version:\s*(.+)\s*$') { return $Matches[1].Trim() }
-        }
-        return $null
+        return ($out.ToString().Trim())
     }
 
     function Test-PipHasExact {
@@ -717,6 +731,7 @@ function New-RunFolderNextToScript {
     return $run
 }
 
+# FIXED: Non-blocking process streaming (avoids hanging when child process writes no newline output)
 function Invoke-ProcessStreamingToProgress {
     param(
         [Parameter(Mandatory=$true)][string]$FilePath,
@@ -737,72 +752,80 @@ function Invoke-ProcessStreamingToProgress {
 
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $psi
+    $p.EnableRaisingEvents = $true
+
+    $q = New-Object System.Collections.Concurrent.ConcurrentQueue[string]
+
+    $outHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $e)
+        if ($e -and $e.Data -ne $null -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
+            $q.Enqueue($e.Data)
+        }
+    }
+
+    $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $e)
+        if ($e -and $e.Data -ne $null -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
+            $q.Enqueue($e.Data)
+        }
+    }
+
+    $p.add_OutputDataReceived($outHandler)
+    $p.add_ErrorDataReceived($errHandler)
 
     $null = $p.Start()
 
-    $stdout = $p.StandardOutput
-    $stderr = $p.StandardError
+    $p.BeginOutputReadLine()
+    $p.BeginErrorReadLine()
 
-    $lastUiTs = 0
-    $minIntervalSec = 0.25
+    $lastUiTs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $minIntervalMs = 250
 
     while (-not $p.HasExited) {
         $line = $null
+        $had = $false
 
-        if (-not $stdout.EndOfStream) {
-            $line = $stdout.ReadLine()
-        } elseif (-not $stderr.EndOfStream) {
-            $line = $stderr.ReadLine()
-        } else {
-            Start-Sleep -Milliseconds 50
-        }
+        while ($q.TryDequeue([ref]$line)) {
+            $had = $true
 
-        if ($line -and -not [string]::IsNullOrWhiteSpace($line)) {
             if ($LogFile) {
                 try { Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8 } catch { }
             }
 
-            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-            if (($now - $lastUiTs) -ge $minIntervalSec) {
+            $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            if (($nowMs - $lastUiTs) -ge $minIntervalMs) {
                 $msg = $line.Trim()
                 if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) + "..." }
                 Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $msg -Phase $Phase
-                $lastUiTs = $now
+                $lastUiTs = $nowMs
             }
+        }
+
+        if (-not $had) {
+            Start-Sleep -Milliseconds 80
         }
     }
 
-    try {
-        while (-not $stdout.EndOfStream) {
-            $l = $stdout.ReadLine()
-            if ($l) {
-                if ($LogFile) { try { Add-Content -LiteralPath $LogFile -Value $l -Encoding UTF8 } catch { } }
-                $m = $l.Trim()
-                if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + "..." }
-                Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $m -Phase $Phase
-            }
+    # Flush remaining lines after exit
+    $line2 = $null
+    while ($q.TryDequeue([ref]$line2)) {
+        if ($LogFile) {
+            try { Add-Content -LiteralPath $LogFile -Value $line2 -Encoding UTF8 } catch { }
         }
-    } catch { }
-
-    try {
-        while (-not $stderr.EndOfStream) {
-            $l = $stderr.ReadLine()
-            if ($l) {
-                if ($LogFile) { try { Add-Content -LiteralPath $LogFile -Value $l -Encoding UTF8 } catch { } }
-                $m = $l.Trim()
-                if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + "..." }
-                Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $m -Phase $Phase
-            }
-        }
-    } catch { }
+        $m = $line2.Trim()
+        if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + "..." }
+        Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $m -Phase $Phase
+    }
 
     $p.WaitForExit()
+
+    try { $p.remove_OutputDataReceived($outHandler) } catch { }
+    try { $p.remove_ErrorDataReceived($errHandler) } catch { }
 
     if ($p.ExitCode -ne 0) {
         throw ("Process failed: {0} (ExitCode={1})" -f $FilePath, $p.ExitCode)
     }
 }
-
 
 function Find-LatestRunFolder {
     param([string]$ScriptDir)
@@ -869,15 +892,15 @@ function Resolve-PythonExe {
 `$runRoot = `$PSScriptRoot
 `$py = Resolve-PythonExe -RunRoot `$runRoot
 if (-not `$py) {
-    Write-Host "Python nicht gefunden. Bitte zuerst rwe_runner.ps1 ausführen." -ForegroundColor Red
-    Read-Host "Enter drücken zum Beenden"
+    Write-Host "Python nicht gefunden. Bitte zuerst rwe_runner.ps1 ausfÃ¼hren." -ForegroundColor Red
+    Read-Host "Enter drÃ¼cken zum Beenden"
     exit 1
 }
 
 `$slideshowPy = `"$slideshowPy`"
 if (-not (Test-Path -LiteralPath `$slideshowPy)) {
     Write-Host "rwe_slideshow.py nicht gefunden: `$slideshowPy" -ForegroundColor Red
-    Read-Host "Enter drücken zum Beenden"
+    Read-Host "Enter drÃ¼cken zum Beenden"
     exit 1
 }
 
@@ -1044,7 +1067,6 @@ try {
         if (Test-Path Env:\RWE_PROGRESS) { Remove-Item Env:\RWE_PROGRESS -ErrorAction SilentlyContinue }
     }
 
-
     Write-ProgressEvent -ProgressFile $progressFile -Percent 90 -Message "Opening config editor" -Phase "bootstrap" -Close
     Stop-LoadingUi -Proc $loadingUi
 
@@ -1053,7 +1075,13 @@ try {
     $cfgExit = 0
     if (Test-Path -LiteralPath $pyw) { & $pyw $editorPy --config $runConfig --defaults $configPath --outputs $outDir; $cfgExit = $LASTEXITCODE }
     else { & $py $editorPy --config $runConfig --defaults $configPath --outputs $outDir; $cfgExit = $LASTEXITCODE }
-    if ($cfgExit -ne 0) { Write-Host "Config editor was closed. Exiting." -ForegroundColor Yellow; return }
+
+    if ($cfgExit -ne 0) {
+        Write-Host "Config editor was closed. Continuing with the current config." -ForegroundColor Yellow
+        # Legacy behavior (kept for reference; do not re-enable):
+        # Write-Host "Config editor was closed. Exiting." -ForegroundColor Yellow
+        # return
+    }
 
     Write-Section "Validate config"
     Validate-Config -ConfigPath $runConfig
