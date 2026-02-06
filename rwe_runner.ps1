@@ -914,6 +914,32 @@ try {
     Assert-Or-Elevate
     Minimize-ConsoleWindow
 
+    # NOTE: From here on, everything continues in Python UI (setup + config + generation).
+    $scriptDir = Get-ScriptDir
+    if ([string]::IsNullOrWhiteSpace($scriptDir)) { throw "Could not determine script directory." }
+
+    $bootstrapPy = Join-Path $scriptDir "app\rwe_bootstrap_ui.py"
+    if (-not (Test-Path -LiteralPath $bootstrapPy)) { throw ("Missing bootstrap UI: {0}" -f $bootstrapPy) }
+
+    $pywLauncher = $null
+    try { $pywLauncher = (Get-Command "pyw.exe" -ErrorAction SilentlyContinue).Source } catch { $pywLauncher = $null }
+    if ([string]::IsNullOrWhiteSpace($pywLauncher)) { $pywLauncher = "pyw.exe" }
+
+    $pyLauncher = $null
+    try { $pyLauncher = (Get-Command "py.exe" -ErrorAction SilentlyContinue).Source } catch { $pyLauncher = $null }
+    if ([string]::IsNullOrWhiteSpace($pyLauncher)) { $pyLauncher = "py.exe" }
+
+    $args = @("-3.10", "`"$bootstrapPy`"", "--repo", "`"$scriptDir`"")
+
+    # Prefer pyw.exe to avoid console focus issues. Fall back to py.exe if needed.
+    try {
+        Start-Process -FilePath $pywLauncher -ArgumentList $args -WindowStyle Normal | Out-Null
+    } catch {
+        Start-Process -FilePath $pyLauncher -ArgumentList $args -WindowStyle Normal | Out-Null
+    }
+
+    return
+
     $scriptPath = Get-ScriptPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) { throw "This script must be saved as a .ps1 file." }
     $scriptDir = Get-ScriptDir
