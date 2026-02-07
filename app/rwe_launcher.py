@@ -83,6 +83,7 @@ def main() -> int:
     parser.add_argument("--config-default", required=True)
     parser.add_argument("--config-run", required=True)
     parser.add_argument("--python", required=True)
+    parser.add_argument("--launch-out", default="")
     args = parser.parse_args()
 
     script_dir = os.path.abspath(args.script_dir)
@@ -281,6 +282,8 @@ def main() -> int:
         ensure_dir(os.path.join(rf, "outputs"))
         opts_path = os.path.join(rf, "launch_options.json")
         save_json(opts_path, opts)
+        if args.launch_out:
+            save_json(os.path.abspath(args.launch_out), opts)
 
         root.destroy()
 

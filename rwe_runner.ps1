@@ -375,29 +375,6 @@ function Install-Pip-Packages {
     & $PipPath install scikit-learn pandas reportlab matplotlib
 }
 
-function Prompt-Int {
-    param([string]$Label, [int]$DefaultValue)
-    while ($true) {
-        $v = Read-Host ("{0} [{1}]" -f $Label, $DefaultValue)
-        if ([string]::IsNullOrWhiteSpace($v)) { return $DefaultValue }
-        if ($v -match '^\d+$') { return [int]$v }
-        Write-Host "Please enter an integer." -ForegroundColor Yellow
-    }
-}
-
-function Prompt-YesNo {
-    param([string]$Label, [bool]$DefaultNo=$true)
-    $suffix = if ($DefaultNo) { " [y/N]" } else { " [Y/n]" }
-    while ($true) {
-        $v = Read-Host ($Label + $suffix)
-        if ([string]::IsNullOrWhiteSpace($v)) { return (-not $DefaultNo) }
-        $t = $v.Trim().ToLowerInvariant()
-        if ($t -eq "y" -or $t -eq "yes") { return $true }
-        if ($t -eq "n" -or $t -eq "no") { return $false }
-        Write-Host "Please enter y or n." -ForegroundColor Yellow
-    }
-}
-
 function Read-ConfigDefaultIterations {
     param([string]$ConfigPath, [int]$Fallback)
     try {
@@ -462,173 +439,34 @@ function Validate-Config {
     }
 }
 
-function New-RunFolderNextToScript {
-    param([string]$ScriptDir)
-    $dateStamp = (Get-Date).ToString("yyyy-MM-dd")
-    $base = Join-Path $ScriptDir $dateStamp
-    Ensure-Folder $base
-    $runStamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
-    $run = Join-Path $base ("run-" + $runStamp)
-    Ensure-Folder $run
-    return $run
-}
-
-function Find-LatestRunFolder {
-    param([string]$ScriptDir)
-    $dirs = Get-ChildItem -LiteralPath $ScriptDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' } | Sort-Object Name -Descending
-    foreach ($d in $dirs) {
-        $runs = Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^run-\d{8}-\d{6}$' } | Sort-Object Name -Descending
-        foreach ($r in $runs) {
-            $state = Join-Path (Join-Path $r.FullName "outputs") "world_state.json"
-            $log = Join-Path (Join-Path $r.FullName "outputs") "world_log.jsonl"
-            if (Test-Path -LiteralPath $state -or Test-Path -LiteralPath $log) {
-                return $r.FullName
-            }
-        }
-    }
-    return $null
-}
-
-function Prompt-Path {
-    param([string]$Label, [string]$DefaultValue)
-    while ($true) {
-        $v = Read-Host ("{0} [{1}]" -f $Label, $DefaultValue)
-        if ([string]::IsNullOrWhiteSpace($v)) { $v = $DefaultValue }
-        $v = $v.Trim()
-        if (Test-Path -LiteralPath $v) { return $v }
-        Write-Host "Path not found. Please enter an existing path." -ForegroundColor Yellow
+function Read-LaunchOptions {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        return $raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $null
     }
 }
 
-function Write-RunSlideshowStarter {
-    param([string]$RunRoot)
+function Write-ProgressEvent {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Phase,
+        [Parameter(Mandatory=$true)][string]$Message,
+        [int]$Percent = -1,
+        [bool]$Close = $false
+    )
 
-    $starterPath = Join-Path $RunRoot "start_slideshow.ps1"
-
-@'
-Set-StrictMode -Version 2
-$ErrorActionPreference = "Stop"
-
-function Resolve-PythonExe {
-    param([string]$RunRoot)
-    $scriptDir = Split-Path -Parent (Split-Path -Parent $RunRoot)
-    $venvPy = Join-Path $scriptDir "venv\Scripts\python.exe"
-    if (Test-Path -LiteralPath $venvPy) { return $venvPy }
-    $cmd = Get-Command "python" -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source) { return $cmd.Source }
-    return $null
-}
-
-$runRoot = $PSScriptRoot
-$py = Resolve-PythonExe -RunRoot $runRoot
-if (-not $py) {
-    Write-Host "Python nicht gefunden. Bitte zuerst rwe_runner.ps1 ausführen." -ForegroundColor Red
-    Read-Host "Enter drücken zum Beenden"
-    exit 1
-}
-
-$slideshowPy = Join-Path $runRoot "rwe_slideshow.py"
-if (-not (Test-Path -LiteralPath $slideshowPy)) {
-@"
-import argparse
-import json
-import os
-import sys
-from typing import List
-
-from PIL import Image, ImageTk
-import tkinter as tk
-
-
-def load_interval(cfg_path: str, default: float = 5.0) -> float:
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f) or {}
-    except Exception:
-        return default
-
-    slideshow = cfg.get("slideshow", {}) if isinstance(cfg, dict) else {}
-    values = slideshow.get("values", {}) if isinstance(slideshow, dict) else {}
-    interval = values.get("interval_seconds", default)
-    try:
-        interval_val = float(interval)
-    except (TypeError, ValueError):
-        return default
-    return interval_val if interval_val > 0 else default
-
-
-def collect_images(out_dir: str) -> List[str]:
-    if not os.path.isdir(out_dir):
-        return []
-    images = [
-        os.path.join(out_dir, name)
-        for name in os.listdir(out_dir)
-        if name.lower().endswith(".png")
-    ]
-    return sorted(images)
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run-root", required=True)
-    args = parser.parse_args()
-
-    run_root = args.run_root
-    out_dir = os.path.join(run_root, "outputs")
-    cfg_path = os.path.join(run_root, "rwe_config.json")
-
-    interval = load_interval(cfg_path)
-    images = collect_images(out_dir)
-    if not images:
-        print("Keine PNG-Bilder im Ausgabeordner gefunden.")
-        return 1
-
-    root = tk.Tk()
-    root.configure(background="black")
-    root.attributes("-fullscreen", True)
-    root.attributes("-topmost", True)
-    root.focus_force()
-
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-
-    label = tk.Label(root, bg="black")
-    label.pack(expand=True, fill="both")
-
-    state = {"idx": 0}
-
-    def close(_event=None) -> None:
-        root.destroy()
-
-    def show_next() -> None:
-        path = images[state["idx"]]
-        img = Image.open(path).convert("RGB")
-        img.thumbnail((sw, sh), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(img)
-        label.configure(image=photo)
-        label.image = photo
-        state["idx"] = (state["idx"] + 1) % len(images)
-        root.after(int(interval * 1000), show_next)
-
-    root.bind("<Escape>", close)
-    root.bind("<Return>", close)
-    root.bind("<space>", close)
-    root.bind("<Button-1>", close)
-
-    show_next()
-    root.mainloop()
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-"@ | Set-Content -LiteralPath $slideshowPy -Encoding UTF8
-}
-
-& $py $slideshowPy --run-root $runRoot
-'@ | Set-Content -LiteralPath $starterPath -Encoding UTF8
-
-    return $starterPath
+    $obj = @{
+        ts = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        phase = $Phase
+        message = $Message
+    }
+    if ($Percent -ge 0) { $obj.percent = $Percent }
+    if ($Close) { $obj.close = $true; $obj.done = $true }
+    ($obj | ConvertTo-Json -Compress) | Add-Content -LiteralPath $Path -Encoding UTF8
 }
 
 try {
@@ -649,97 +487,129 @@ try {
     Validate-Config -ConfigPath $configPath
     Write-Host "Config OK." -ForegroundColor Green
 
-    Write-Section "Resume mode"
-    $runRoot = $null
-    $latest = Find-LatestRunFolder -ScriptDir $scriptDir
-    if ([string]::IsNullOrWhiteSpace($latest)) {
-        Write-Host "No previous run folder found. Starting a new run." -ForegroundColor Yellow
-        $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
-    } else {
-        $doResume = Prompt-YesNo -Label "Resume previous run?" -DefaultNo $true
-        if ($doResume) {
-            $runRoot = Prompt-Path -Label "Run folder to resume" -DefaultValue $latest
-        } else {
-            $runRoot = New-RunFolderNextToScript -ScriptDir $scriptDir
-        }
-    }
-
-    Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
-
     $appDir   = Join-Path $scriptDir "app"
     $cacheDir = Join-Path $scriptDir "cache"
     $venvDir  = Join-Path $scriptDir "venv"
-    $outDir   = Join-Path $runRoot "outputs"
 
     Ensure-Folder $appDir
     Ensure-Folder $cacheDir
-    Ensure-Folder $outDir
-
-    $runConfig = Join-Path $runRoot "rwe_config.json"
-    if (-not (Test-Path -LiteralPath $runConfig)) {
-        Copy-FileSafe -Src $configPath -Dst $runConfig
-    }
-
-    Write-RunSlideshowStarter -RunRoot $runRoot
 
     $env:HF_HOME = $cacheDir
 
     $rwePy = Join-Path $appDir "rwe_v04.py"
-    $editorPy = Join-Path $appDir "rwe_config_editor.py"
+    $launcherPy = Join-Path $appDir "rwe_launcher.py"
+    $runUiPy = Join-Path $appDir "rwe_run_ui.py"
+    $slideshowPy = Join-Path $appDir "rwe_slideshow.py"
     if (-not (Test-Path -LiteralPath $rwePy)) { throw "Missing app script: $rwePy. Please reinstall or restore the app folder." }
-    if (-not (Test-Path -LiteralPath $editorPy)) { throw "Missing config editor script: $editorPy. Please reinstall or restore the app folder." }
+    if (-not (Test-Path -LiteralPath $launcherPy)) { throw "Missing app script: $launcherPy. Please reinstall or restore the app folder." }
+    if (-not (Test-Path -LiteralPath $runUiPy)) { throw "Missing app script: $runUiPy. Please reinstall or restore the app folder." }
+    if (-not (Test-Path -LiteralPath $slideshowPy)) { throw "Missing app script: $slideshowPy. Please reinstall or restore the app folder." }
 
     $py = Join-Path $venvDir "Scripts\\python.exe"
     if (-not (Test-Path -LiteralPath $py)) {
         throw "Python venv not found at '$py'. Run rwe_installer.ps1 first."
     }
 
+    $runConfigShared = Join-Path $scriptDir "rwe_config_run.json"
+    $launchOut = Join-Path $scriptDir "last_launch.json"
+
+    Write-Section "Launcher"
+    & $py $launcherPy --script-dir $scriptDir --config-default $configPath --config-run $runConfigShared --python $py --launch-out $launchOut
+
+    $launch = Read-LaunchOptions -Path $launchOut
+    if (-not $launch -or -not $launch.run_root) {
+        Write-Host "Launcher closed without starting a run." -ForegroundColor Yellow
+        Wait-ForEnter "Press Enter to exit..."
+        return
+    }
+
+    $runRoot = $launch.run_root
+    if (-not (Test-Path -LiteralPath $runRoot)) { throw ("Run folder not found: {0}" -f $runRoot) }
+
+    $outDir   = Join-Path $runRoot "outputs"
+    Ensure-Folder $outDir
+
+    $runConfig = Join-Path $runRoot "rwe_config.json"
+    if (Test-Path -LiteralPath $runConfigShared) {
+        Copy-FileSafe -Src $runConfigShared -Dst $runConfig
+    } elseif (-not (Test-Path -LiteralPath $runConfig)) {
+        Copy-FileSafe -Src $configPath -Dst $runConfig
+    }
+
     Write-DetectedHardwareInfo
     $backendFile = Join-Path $scriptDir "rwe_backend.txt"
-    $backend = $null
-    if (Test-Path -LiteralPath $backendFile) {
-        $backend = (Get-Content -LiteralPath $backendFile -Raw -ErrorAction SilentlyContinue).Trim()
+    $backendPref = $launch.backend
+    if ([string]::IsNullOrWhiteSpace($backendPref)) { $backendPref = "auto" }
+    if ($backendPref -eq "auto") {
+        if (Test-Path -LiteralPath $backendFile) {
+            $backendPref = (Get-Content -LiteralPath $backendFile -Raw -ErrorAction SilentlyContinue).Trim()
+        }
+        if ([string]::IsNullOrWhiteSpace($backendPref)) {
+            $backendPref = Get-PreferredBackend
+        }
     }
-    if ([string]::IsNullOrWhiteSpace($backend)) {
-        $backend = "cpu"
-        Write-Host "No stored backend found. Defaulting to CPU." -ForegroundColor Yellow
-    }
-    $verify = Test-BackendInPython -PythonPath $py -Backend $backend
+
+    if ([string]::IsNullOrWhiteSpace($backendPref)) { $backendPref = "cpu" }
+    $verify = Test-BackendInPython -PythonPath $py -Backend $backendPref
     if ($verify -ne 0) {
-        Write-Host ("Backend '{0}' failed to verify. Falling back to CPU." -f $backend) -ForegroundColor Yellow
-        $backend = "cpu"
+        Write-Host ("Backend '{0}' failed to verify. Falling back to CPU." -f $backendPref) -ForegroundColor Yellow
+        $backendPref = "cpu"
     }
-    Write-Host ("Selected backend: {0}" -f $backend) -ForegroundColor Green
-    $env:RWE_BACKEND = $backend
+    Write-Host ("Selected backend: {0}" -f $backendPref) -ForegroundColor Green
+    $env:RWE_BACKEND = $backendPref
 
-    Write-Section "Config editor"
-    $editConfig = Prompt-YesNo -Label "Konfiguration jetzt bearbeiten?" -DefaultNo $true
-    if ($editConfig) {
-        & $py $editorPy --config $runConfig --defaults $configPath --outputs $outDir
-        Write-Section "Validate config"
-        Validate-Config -ConfigPath $runConfig
-        Write-Host "Config OK." -ForegroundColor Green
+    Write-Section "Validate config"
+    Validate-Config -ConfigPath $runConfig
+    Write-Host "Config OK." -ForegroundColor Green
+
+    $iters = $launch.iterations
+    if (-not $iters -or $iters -lt 1) {
+        $iters = Read-ConfigDefaultIterations -ConfigPath $runConfig -Fallback 10
     }
-
-    Write-Section "Run settings"
-    $defaultIters = Read-ConfigDefaultIterations -ConfigPath $runConfig -Fallback 10
-    $iters = Prompt-Int -Label "Iterations" -DefaultValue $defaultIters
 
     $env:RWE_CONFIG = $runConfig
     $env:RWE_OUT    = $outDir
     $env:RWE_ITERS  = [string]$iters
+    if ($launch.show_images) { $env:RWE_SHOW_IMAGES = "1" }
+    if ($launch.hf_token) { $env:HF_TOKEN = $launch.hf_token }
+
+    $progressFile = Join-Path $runRoot "progress.jsonl"
+    $logFile = Join-Path $runRoot "run.log"
+    $doneFlag = Join-Path $runRoot "done.flag"
+    $worldLog = Join-Path $outDir "world_log.jsonl"
+    if (Test-Path -LiteralPath $doneFlag) { Remove-Item -LiteralPath $doneFlag -Force -ErrorAction SilentlyContinue }
+
+    Write-ProgressEvent -Path $progressFile -Phase "setup" -Message "RWE startet..." -Percent 1
 
     Write-Section "Start"
     Write-Host ("Python: {0}" -f $py) -ForegroundColor Green
     Write-Host ("Script: {0}" -f $rwePy) -ForegroundColor Green
     Write-Host ("Output: {0}" -f $outDir) -ForegroundColor Green
 
-    & $py $rwePy
+    $runUiProc = Start-Process -FilePath $py -ArgumentList @(
+        $runUiPy,
+        "--run-root", $runRoot,
+        "--out-dir", $outDir,
+        "--progress-file", $progressFile,
+        "--log-file", $logFile,
+        "--world-log", $worldLog,
+        "--done-flag", $doneFlag
+    ) -PassThru
+
+    Write-ProgressEvent -Path $progressFile -Phase "run" -Message "Generierung läuft..." -Percent 5
+
+    $runProc = Start-Process -FilePath $py -ArgumentList @($rwePy) -NoNewWindow -PassThru -Wait `
+        -RedirectStandardOutput $logFile -RedirectStandardError $logFile
+
+    Write-ProgressEvent -Path $progressFile -Phase "done" -Message "Generierung abgeschlossen." -Percent 100 -Close $true
+    Set-Content -LiteralPath $doneFlag -Value "done" -Encoding UTF8
 
     if (Test-Path Env:\RWE_CONFIG) { Remove-Item Env:\RWE_CONFIG -ErrorAction SilentlyContinue }
     if (Test-Path Env:\RWE_OUT) { Remove-Item Env:\RWE_OUT -ErrorAction SilentlyContinue }
     if (Test-Path Env:\RWE_ITERS) { Remove-Item Env:\RWE_ITERS -ErrorAction SilentlyContinue }
     if (Test-Path Env:\RWE_BACKEND) { Remove-Item Env:\RWE_BACKEND -ErrorAction SilentlyContinue }
+    if (Test-Path Env:\RWE_SHOW_IMAGES) { Remove-Item Env:\RWE_SHOW_IMAGES -ErrorAction SilentlyContinue }
+    if (Test-Path Env:\HF_TOKEN) { Remove-Item Env:\HF_TOKEN -ErrorAction SilentlyContinue }
 
     $pdfPath = Join-Path (Join-Path $outDir "atlas") "rwe_atlas_v04.pdf"
 
@@ -747,12 +617,12 @@ try {
     Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
     Write-Host ("Atlas PDF:  {0}" -f $pdfPath) -ForegroundColor Cyan
 
-    if (Test-Path -LiteralPath $pdfPath) {
-        Write-Section "Open PDF"
-        Start-Process -FilePath $pdfPath | Out-Null
-    } else {
+    if (-not (Test-Path -LiteralPath $pdfPath)) {
         Write-Host "PDF not found (generation failed or path changed)." -ForegroundColor Yellow
     }
+
+    Write-Section "Slideshow"
+    & $py $slideshowPy --run-root $runRoot
 
     Wait-ForEnter "Press Enter to exit..."
 } catch {
