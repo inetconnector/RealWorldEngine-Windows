@@ -9,22 +9,22 @@ from tkinter import messagebox, scrolledtext, ttk
 DEFAULT_GENESIS_URL = "https://de.wikipedia.org/wiki/Der_Kuss_(Klimt)#/media/Datei:The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg"
 
 LIST_SECTIONS = [
-    ("initial_words", "Initiale Motive"),
-    ("banned_motifs", "Gesperrte Motive"),
-    ("stopwords", "Stoppwörter"),
-    ("style_pool", "Stil-Pool"),
-    ("novelty_motif_pool", "Neuheits-Motiv-Pool"),
-    ("escape_motifs", "Escape-Motive"),
+    ("initial_words", "Initial Motifs"),
+    ("banned_motifs", "Blocked Motifs"),
+    ("stopwords", "Stopwords"),
+    ("style_pool", "Style Pool"),
+    ("novelty_motif_pool", "Novelty Motif Pool"),
+    ("escape_motifs", "Escape Motifs"),
 ]
 
 
 SIZE_PRESETS = [
     ("standard_square", "Standard (1024×1024)", 1024, 1024),
     ("tshirt_square", "T‑Shirt / Sticker (1536×1536)", 1536, 1536),
-    ("portrait_3_4", "Poster Hochformat 3:4 (832×1216)", 832, 1216),
-    ("landscape_4_3", "Poster Querformat 4:3 (1216×832)", 1216, 832),
-    ("portrait_2_3", "Kunstdruck Hochformat 2:3 (1024×1536)", 1024, 1536),
-    ("landscape_3_2", "Kunstdruck Querformat 3:2 (1536×1024)", 1536, 1024),
+    ("portrait_3_4", "Poster Portrait 3:4 (832×1216)", 832, 1216),
+    ("landscape_4_3", "Poster Landscape 4:3 (1216×832)", 1216, 832),
+    ("portrait_2_3", "Art Print Portrait 2:3 (1024×1536)", 1024, 1536),
+    ("landscape_3_2", "Art Print Landscape 3:2 (1536×1024)", 1536, 1024),
 ]
 
 
@@ -33,6 +33,13 @@ def load_json(path: str) -> dict:
         return {}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f) or {}
+
+
+def load_license_text(path: str) -> str:
+    if not path or not os.path.exists(path):
+        return "License file not found."
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip() or "License file is empty."
 
 
 def ensure_section(cfg: dict, key: str) -> dict:
@@ -83,7 +90,7 @@ def describe_section(cfg: dict, key: str) -> str:
     if desc:
         lines.append(desc)
     if effects:
-        lines.append("Wirkung:")
+        lines.append("Effects:")
         for e in effects:
             lines.append(f"• {e}")
     return "\n".join(lines)
@@ -91,7 +98,7 @@ def describe_section(cfg: dict, key: str) -> str:
 
 def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> None:
     root = tk.Tk()
-    root.title("RWE Konfigurations-Editor")
+    root.title("RWE Configuration Editor")
     root.geometry("920x760")
     root.minsize(840, 660)
 
@@ -104,10 +111,10 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     main = ttk.Frame(root, padding=12)
     main.pack(fill=tk.BOTH, expand=True)
 
-    header = ttk.Label(main, text="RWE Konfigurations-Editor", font=("Segoe UI", 16, "bold"))
+    header = ttk.Label(main, text="RWE Configuration Editor", font=("Segoe UI", 16, "bold"))
     header.pack(anchor=tk.W, pady=(0, 4))
 
-    path_label = ttk.Label(main, text=f"Datei: {cfg_path}", foreground="#555555")
+    path_label = ttk.Label(main, text=f"File: {cfg_path}", foreground="#555555")
     path_label.pack(anchor=tk.W, pady=(0, 10))
 
     notebook = ttk.Notebook(main)
@@ -128,13 +135,13 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     enabled_row = ttk.Frame(genesis_frame)
     enabled_row.pack(anchor=tk.W, pady=(4, 8), fill=tk.X)
 
-    enabled_cb = ttk.Checkbutton(enabled_row, text="Genesis-Bild verwenden", variable=genesis_enabled_var)
+    enabled_cb = ttk.Checkbutton(enabled_row, text="Use genesis image", variable=genesis_enabled_var)
     enabled_cb.pack(side=tk.LEFT)
 
     genesis_row = ttk.Frame(genesis_frame)
     genesis_row.pack(anchor=tk.W, pady=(4, 8), fill=tk.X)
 
-    genesis_url_label = ttk.Label(genesis_row, text="Genesis-Bild URL:")
+    genesis_url_label = ttk.Label(genesis_row, text="Genesis image URL:")
     genesis_url_label.pack(side=tk.LEFT)
 
     genesis_url_var = tk.StringVar()
@@ -144,7 +151,7 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     genesis_kw_row = ttk.Frame(genesis_frame)
     genesis_kw_row.pack(anchor=tk.W, pady=(4, 8))
 
-    genesis_kw_label = ttk.Label(genesis_kw_row, text="Max. Analyse-Keywords:")
+    genesis_kw_label = ttk.Label(genesis_kw_row, text="Max analysis keywords:")
     genesis_kw_label.pack(side=tk.LEFT)
 
     genesis_kw_var = tk.StringVar()
@@ -155,13 +162,13 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     genesis_style_row.pack(anchor=tk.W, pady=(4, 8))
 
     genesis_style_var = tk.BooleanVar(value=False)
-    genesis_style_cb = ttk.Checkbutton(genesis_style_row, text="Genesis als Stilvorlage (img2img) verwenden", variable=genesis_style_var)
+    genesis_style_cb = ttk.Checkbutton(genesis_style_row, text="Use genesis as style reference (img2img)", variable=genesis_style_var)
     genesis_style_cb.pack(side=tk.LEFT)
 
     genesis_strength_row = ttk.Frame(genesis_frame)
     genesis_strength_row.pack(anchor=tk.W, pady=(4, 8))
 
-    genesis_strength_label = ttk.Label(genesis_strength_row, text="Stärke (img2img, 0.0 - 1.0):")
+    genesis_strength_label = ttk.Label(genesis_strength_row, text="Strength (img2img, 0.0 - 1.0):")
     genesis_strength_label.pack(side=tk.LEFT)
 
     genesis_strength_var = tk.StringVar()
@@ -171,7 +178,7 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     genesis_iters_row = ttk.Frame(genesis_frame)
     genesis_iters_row.pack(anchor=tk.W, pady=(4, 8))
 
-    genesis_iters_label = ttk.Label(genesis_iters_row, text="Genesis-Iterationen (img2img):")
+    genesis_iters_label = ttk.Label(genesis_iters_row, text="Genesis iterations (img2img):")
     genesis_iters_label.pack(side=tk.LEFT)
 
     genesis_iters_var = tk.StringVar()
@@ -199,7 +206,7 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
         hint_label = ttk.Label(frame, text=hint_text, wraplength=860, justify=tk.LEFT)
         hint_label.pack(anchor=tk.W, pady=(0, 8))
 
-        helper = ttk.Label(frame, text="Ein Eintrag pro Zeile. Leerzeilen werden ignoriert.")
+        helper = ttk.Label(frame, text="One entry per line. Blank lines are ignored.")
         helper.pack(anchor=tk.W, pady=(0, 6))
 
         text = scrolledtext.ScrolledText(frame, height=16, wrap=tk.WORD)
@@ -216,25 +223,24 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     runtime_row = ttk.Frame(runtime_frame)
     runtime_row.pack(anchor=tk.W, pady=(4, 8))
 
-    iter_label = ttk.Label(runtime_row, text="Standard-Iterationen:")
+    iter_label = ttk.Label(runtime_row, text="Default iterations:")
     iter_label.pack(side=tk.LEFT)
 
     iter_var = tk.StringVar()
     iter_entry = ttk.Entry(runtime_row, textvariable=iter_var, width=10)
     iter_entry.pack(side=tk.LEFT, padx=(8, 0))
 
-size_row = ttk.Frame(runtime_frame)
-size_row.pack(anchor=tk.W, pady=(2, 8), fill=tk.X)
+    size_row = ttk.Frame(runtime_frame)
+    size_row.pack(anchor=tk.W, pady=(2, 8), fill=tk.X)
 
-ttk.Label(size_row, text="Bildgröße:").pack(side=tk.LEFT)
+    ttk.Label(size_row, text="Image size:").pack(side=tk.LEFT)
 
-size_preset_var = tk.StringVar()
-size_options = ttk.Frame(size_row)
-size_options.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
+    size_preset_var = tk.StringVar()
+    size_options = ttk.Frame(size_row)
+    size_options.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
 
-for pid, label, w, h in SIZE_PRESETS:
-    ttk.Radiobutton(size_options, text=label, value=pid, variable=size_preset_var).pack(anchor=tk.W)
-
+    for pid, label, w, h in SIZE_PRESETS:
+        ttk.Radiobutton(size_options, text=label, value=pid, variable=size_preset_var).pack(anchor=tk.W)
 
     slideshow_frame = ttk.Frame(notebook, padding=12)
     notebook.add(slideshow_frame, text="Slideshow")
@@ -246,12 +252,22 @@ for pid, label, w, h in SIZE_PRESETS:
     slideshow_row = ttk.Frame(slideshow_frame)
     slideshow_row.pack(anchor=tk.W, pady=(4, 8))
 
-    interval_label = ttk.Label(slideshow_row, text="Umschaltzeit (Sekunden):")
+    interval_label = ttk.Label(slideshow_row, text="Interval (seconds):")
     interval_label.pack(side=tk.LEFT)
 
     interval_var = tk.StringVar()
     interval_entry = ttk.Entry(slideshow_row, textvariable=interval_var, width=10)
     interval_entry.pack(side=tk.LEFT, padx=(8, 0))
+
+    license_frame = ttk.Frame(notebook, padding=12)
+    notebook.add(license_frame, text="License")
+
+    license_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "LICENSE-stable-diffusion.txt"))
+    license_content = load_license_text(license_path)
+    license_text = scrolledtext.ScrolledText(license_frame, wrap=tk.WORD, height=28)
+    license_text.pack(fill=tk.BOTH, expand=True)
+    license_text.insert(tk.END, license_content)
+    license_text.configure(state=tk.DISABLED)
 
     def load_into_fields(source_cfg: dict) -> None:
         for key, _ in LIST_SECTIONS:
@@ -265,17 +281,17 @@ for pid, label, w, h in SIZE_PRESETS:
         iter_val = values.get("iterations", 10)
         iter_var.set(str(iter_val))
 
-w_val = values.get("width", 1024)
-h_val = values.get("height", 1024)
-preset_val = values.get("size_preset", "")
-if not preset_val:
-    for pid, _, pw, ph in SIZE_PRESETS:
-        if int(pw) == int(w_val) and int(ph) == int(h_val):
-            preset_val = pid
-            break
-if not preset_val:
-    preset_val = "standard_square"
-size_preset_var.set(preset_val)
+        w_val = values.get("width", 1024)
+        h_val = values.get("height", 1024)
+        preset_val = values.get("size_preset", "")
+        if not preset_val:
+            for pid, _, pw, ph in SIZE_PRESETS:
+                if int(pw) == int(w_val) and int(ph) == int(h_val):
+                    preset_val = pid
+                    break
+        if not preset_val:
+            preset_val = "standard_square"
+        size_preset_var.set(preset_val)
 
 
         slideshow_sec = source_cfg.get("slideshow", {})
@@ -308,15 +324,15 @@ size_preset_var.set(preset_val)
 
     def handle_open_outputs() -> None:
         if not outputs_dir:
-            messagebox.showinfo("Ausgabeordner", "Kein Ausgabeordner bekannt.")
+            messagebox.showinfo("Output folder", "No output folder known.")
             return
         if not os.path.exists(outputs_dir):
-            messagebox.showwarning("Ausgabeordner", "Der Ausgabeordner existiert noch nicht.")
+            messagebox.showwarning("Output folder", "The output folder does not exist yet.")
             return
         try:
             os.startfile(outputs_dir)
         except Exception as exc:
-            messagebox.showerror("Ausgabeordner", f"Konnte Ordner nicht öffnen:\n{exc}")
+            messagebox.showerror("Output folder", f"Could not open folder:\n{exc}")
 
     def handle_restore_defaults() -> None:
         load_into_fields(default_cfg)
@@ -328,7 +344,7 @@ size_preset_var.set(preset_val)
             sec = ensure_list_section(updated, key)
             values = text_to_list(list_widgets[key].get("1.0", tk.END))
             if not values:
-                messagebox.showerror("Fehler", f"'{key}' darf nicht leer sein.")
+                messagebox.showerror("Error", f"'{key}' must not be empty.")
                 return
             sec["values"] = values
 
@@ -343,27 +359,27 @@ size_preset_var.set(preset_val)
 
         iter_text = iter_var.get().strip()
         if not iter_text.isdigit() or int(iter_text) < 1:
-            messagebox.showerror("Fehler", "Bitte eine gültige positive Zahl für Iterationen eingeben.")
+            messagebox.showerror("Error", "Please enter a valid positive number for iterations.")
             return
         runtime_values["iterations"] = int(iter_text)
 
-sel_preset = (size_preset_var.get() or "").strip()
-if not sel_preset:
-    messagebox.showerror("Fehler", "Bitte eine Bildgröße auswählen.")
-    return
+        sel_preset = (size_preset_var.get() or "").strip()
+        if not sel_preset:
+            messagebox.showerror("Error", "Please select an image size.")
+            return
 
-match = None
-for pid, _, w, h in SIZE_PRESETS:
-    if pid == sel_preset:
-        match = (w, h)
-        break
-if match is None:
-    messagebox.showerror("Fehler", "Ungültige Bildgröße ausgewählt.")
-    return
+        match = None
+        for pid, _, w, h in SIZE_PRESETS:
+            if pid == sel_preset:
+                match = (w, h)
+                break
+        if match is None:
+            messagebox.showerror("Error", "Invalid image size selected.")
+            return
 
-runtime_values["size_preset"] = sel_preset
-runtime_values["width"] = int(match[0])
-runtime_values["height"] = int(match[1])
+        runtime_values["size_preset"] = sel_preset
+        runtime_values["width"] = int(match[0])
+        runtime_values["height"] = int(match[1])
 
 
         slideshow_sec = updated.setdefault("slideshow", {})
@@ -379,10 +395,10 @@ runtime_values["height"] = int(match[1])
         try:
             interval_val = float(interval_text)
         except ValueError:
-            messagebox.showerror("Fehler", "Bitte eine gültige Zahl für die Umschaltzeit eingeben.")
+            messagebox.showerror("Error", "Please enter a valid number for the interval.")
             return
         if interval_val <= 0:
-            messagebox.showerror("Fehler", "Die Umschaltzeit muss größer als 0 sein.")
+            messagebox.showerror("Error", "The interval must be greater than 0.")
             return
         slideshow_values["interval_seconds"] = interval_val
 
@@ -406,7 +422,7 @@ runtime_values["height"] = int(match[1])
         kw_text = genesis_kw_var.get().strip()
         if kw_text:
             if not kw_text.isdigit() or int(kw_text) < 1:
-                messagebox.showerror("Fehler", "Bitte eine gültige positive Zahl für Analyse-Keywords eingeben.")
+                messagebox.showerror("Error", "Please enter a valid positive number for analysis keywords.")
                 return
             genesis_values["analysis_keywords"] = int(kw_text)
 
@@ -416,23 +432,23 @@ runtime_values["height"] = int(match[1])
         try:
             strength_val = float(strength_text)
         except ValueError:
-            messagebox.showerror("Fehler", "Bitte eine gültige Zahl für Stärke eingeben.")
+            messagebox.showerror("Error", "Please enter a valid number for strength.")
             return
         if strength_val < 0.0 or strength_val > 1.0:
-            messagebox.showerror("Fehler", "Stärke muss zwischen 0.0 und 1.0 liegen.")
+            messagebox.showerror("Error", "Strength must be between 0.0 and 1.0.")
             return
         genesis_values["strength"] = strength_val
 
         iters_text = genesis_iters_var.get().strip()
         if not iters_text.isdigit() or int(iters_text) < 0:
-            messagebox.showerror("Fehler", "Bitte eine gültige Zahl für Genesis-Iterationen eingeben.")
+            messagebox.showerror("Error", "Please enter a valid number for genesis iterations.")
             return
         genesis_values["iters"] = int(iters_text)
 
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(updated, f, ensure_ascii=False, indent=2)
 
-        messagebox.showinfo("Gespeichert", "Konfiguration wurde gespeichert.")
+        messagebox.showinfo("Saved", "Configuration saved.")
         root.destroy()
 
     load_into_fields(cfg)
@@ -440,16 +456,16 @@ runtime_values["height"] = int(match[1])
     buttons = ttk.Frame(main)
     buttons.pack(fill=tk.X, pady=(10, 0))
 
-    open_btn = ttk.Button(buttons, text="Ausgabeordner öffnen", command=handle_open_outputs)
+    open_btn = ttk.Button(buttons, text="Open output folder", command=handle_open_outputs)
     open_btn.pack(side=tk.LEFT)
 
-    restore_btn = ttk.Button(buttons, text="Defaults wiederherstellen", command=handle_restore_defaults)
+    restore_btn = ttk.Button(buttons, text="Restore defaults", command=handle_restore_defaults)
     restore_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-    cancel_btn = ttk.Button(buttons, text="Abbrechen", command=root.destroy)
+    cancel_btn = ttk.Button(buttons, text="Cancel", command=root.destroy)
     cancel_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
-    save_btn = ttk.Button(buttons, text="Speichern & Schließen", command=handle_save)
+    save_btn = ttk.Button(buttons, text="Save & Close", command=handle_save)
     save_btn.pack(side=tk.RIGHT)
 
     root.mainloop()
