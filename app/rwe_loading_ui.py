@@ -28,7 +28,7 @@ def main() -> int:
     progress_path = os.path.abspath(args.progress)
 
     root = tk.Tk()
-    root.title("RWE Setup")
+    root.title("Real World Engine")
     # Make the UI the primary visible window.
     try:
         root.state("zoomed")
@@ -49,10 +49,11 @@ def main() -> int:
     mainf = ttk.Frame(root, padding=14)
     mainf.pack(fill=tk.BOTH, expand=True)
 
-    header = ttk.Label(mainf, text="RWE Setup", font=("Segoe UI", 16, "bold"))
+    header = ttk.Label(mainf, text="Real World Engine", font=("Segoe UI", 16, "bold"))
     header.pack(anchor=tk.W)
 
-    sub = ttk.Label(mainf, text="Initialisierung läuft…", foreground="#555555")
+    sub_text = tk.StringVar(value="Setup & Onboarding / Einrichtung & Onboarding")
+    sub = ttk.Label(mainf, textvariable=sub_text, foreground="#555555")
     sub.pack(anchor=tk.W, pady=(2, 10))
 
     bar = ttk.Progressbar(mainf, mode="determinate", maximum=100)
@@ -113,7 +114,10 @@ def main() -> int:
     token_value.trace_add("write", lambda *_a: write_token_file())
     update_entry_state()
 
-    log = tk.Text(mainf, height=16, wrap=tk.WORD)
+    checklist_frame = ttk.Frame(mainf)
+    checklist_frame.pack(fill=tk.BOTH, expand=True)
+
+    log = tk.Text(checklist_frame, height=16, wrap=tk.WORD)
     log.configure(state=tk.DISABLED)
     log.pack(fill=tk.BOTH, expand=True)
 
@@ -124,6 +128,7 @@ def main() -> int:
         "offset": 0,
         "last_percent": 0,
         "closing": False,
+        "ready": False,
     }
 
     def on_close() -> None:
@@ -184,6 +189,17 @@ def main() -> int:
             line_out = f"{ts_s}{phase}: {message}".strip(": ")
             if line_out:
                 append_log(line_out)
+
+            if not state["ready"]:
+                ready_marker = f"{phase} {message}".lower()
+                percent_ready = state["last_percent"] >= 100
+                if percent_ready and "ready" in ready_marker:
+                    state["ready"] = True
+                    sub_text.set(
+                        "Eine KI-Engine, die Ideen in lebendige, kontinuierlich wachsende Bildwelten übersetzt."
+                        " / An AI engine that turns ideas into living, continuously evolving visual worlds."
+                    )
+                    checklist_frame.pack_forget()
 
             if bool(obj.get("close", False)) or bool(obj.get("done", False)):
                 state["closing"] = True
