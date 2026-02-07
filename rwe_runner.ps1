@@ -612,8 +612,8 @@ try {
         if ($launch.hf_token) { $env:HF_TOKEN = $launch.hf_token }
 
         $progressFile = Join-Path $runRoot "progress.jsonl"
-        $logFile = Join-Path $runRoot "run.log"
-        $errFile = Join-Path $runRoot "run.err.log"
+        $logFile = Join-Path $runRoot "out.log"
+        $errFile = ""
         $doneFlag = Join-Path $runRoot "done.flag"
         $worldLog = Join-Path $outDir "world_log.jsonl"
         $controlFile = Join-Path $runRoot "ui_control.json"
@@ -650,8 +650,11 @@ try {
 
         Hide-ConsoleWindow
 
-        $runProc = Start-Process -FilePath $py -ArgumentList @($rwePy) -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput $logFile -RedirectStandardError $errFile
+        Set-Content -LiteralPath $logFile -Value "" -Encoding UTF8
+        $runProc = Start-Process -FilePath "cmd.exe" -ArgumentList @(
+            "/c",
+            "`"$py`" `"$rwePy`" 1>> `"$logFile`" 2>>&1"
+        ) -WindowStyle Hidden -PassThru
 
         $requestedAction = ""
         while ($true) {
