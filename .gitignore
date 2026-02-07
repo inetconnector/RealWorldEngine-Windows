@@ -16,3 +16,5 @@ cache/
 *.pyc
 __pycache__/
 bootstrap_progress.jsonl
+rwe_config_run.json
+last_launch.json
