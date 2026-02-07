@@ -720,6 +720,35 @@ function Apply-HFTokenFromFile {
     } catch { }
 }
 
+function Get-HFHubCacheDir {
+    $cache = $env:HUGGINGFACE_HUB_CACHE
+    if (-not [string]::IsNullOrWhiteSpace($cache)) { return $cache }
+
+    $hfHome = $env:HF_HOME
+    if (-not [string]::IsNullOrWhiteSpace($hfHome)) {
+        return (Join-Path $hfHome "hub")
+    }
+
+    $userProfile = $env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace($userProfile)) { return $null }
+    return (Join-Path (Join-Path $userProfile ".cache\\huggingface") "hub")
+}
+
+function Get-HFCacheDownloadBytes {
+    param([string]$CacheDir)
+    if ([string]::IsNullOrWhiteSpace($CacheDir)) { return 0 }
+    if (-not (Test-Path -LiteralPath $CacheDir)) { return 0 }
+    try {
+        $total = 0
+        Get-ChildItem -LiteralPath $CacheDir -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '\.(incomplete|tmp|part)$' } |
+            ForEach-Object { $total += $_.Length }
+        return $total
+    } catch {
+        return 0
+    }
+}
+
 function New-RunFolderNextToScript {
     param([string]$ScriptDir)
     $dateStamp = (Get-Date).ToString("yyyy-MM-dd")
@@ -739,7 +768,8 @@ function Invoke-ProcessStreamingToProgress {
         [Parameter(Mandatory=$true)][string]$ProgressFile,
         [Parameter(Mandatory=$true)][double]$Percent,
         [Parameter(Mandatory=$true)][string]$Phase,
-        [string]$LogFile = ""
+        [string]$LogFile = "",
+        [scriptblock]$HeartbeatInfo = $null
     )
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -847,7 +877,11 @@ function Invoke-ProcessStreamingToProgress {
                 if (-not [string]::IsNullOrWhiteSpace($LogFile)) {
                     $logHint = " See " + [System.IO.Path]::GetFileName($LogFile) + "."
                 }
-                $msg = ("Still working... no output for {0}s.{1}" -f $noOutputSec, $logHint)
+                $extra = ""
+                if ($HeartbeatInfo) {
+                    try { $extra = & $HeartbeatInfo } catch { $extra = "" }
+                }
+                $msg = ("Still working... no output for {0}s.{1}{2}" -f $noOutputSec, $logHint, $extra)
                 Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $msg -Phase $Phase
                 $lastHeartbeatMs = $nowMs
                 $lastUiTs = $nowMs
@@ -1133,13 +1167,21 @@ try {
         $prevPyUnbuffered = $env:PYTHONUNBUFFERED
         $env:PYTHONUNBUFFERED = "1"
 
+        $hfCacheDir = Get-HFHubCacheDir
         Invoke-ProcessStreamingToProgress `
             -FilePath $py `
             -ArgumentList @("-u", "`"$prefetchPy`"", "--progress", "`"$progressFile`"") `
             -ProgressFile $progressFile `
             -Percent 72 `
             -Phase "prefetch" `
-            -LogFile $prefetchLog
+            -LogFile $prefetchLog `
+            -HeartbeatInfo {
+                $bytes = Get-HFCacheDownloadBytes -CacheDir $hfCacheDir
+                if ($bytes -gt 0) {
+                    return (" Downloaded so far: {0} MB" -f [Math]::Round(($bytes / 1MB), 1))
+                }
+                return ""
+            }
 
         if ($null -ne $prevPyUnbuffered) { $env:PYTHONUNBUFFERED = $prevPyUnbuffered }
         else { if (Test-Path Env:\PYTHONUNBUFFERED) { Remove-Item Env:\PYTHONUNBUFFERED -ErrorAction SilentlyContinue } }
