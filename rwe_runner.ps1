@@ -5,6 +5,19 @@ try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Nu
 
 function Write-Section { param([string]$Text) Write-Host ""; Write-Host ("=== {0} ===" -f $Text) -ForegroundColor Cyan }
 function Wait-ForEnter { param([string]$Message = "Press Enter to continue...") [void](Read-Host $Message) }
+function Hide-ConsoleWindow {
+    try {
+        $sig = @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+'@
+        Add-Type -Name RweWin -Namespace Rwe -MemberDefinition $sig -ErrorAction SilentlyContinue | Out-Null
+        $hwnd = [Rwe.RweWin]::GetConsoleWindow()
+        if ($hwnd -ne [IntPtr]::Zero) {
+            [Rwe.RweWin]::ShowWindow($hwnd, 0) | Out-Null
+        }
+    } catch { }
+}
 
 function Show-ErrorAndWait {
     param([string]$Context, [System.Exception]$Ex)
@@ -574,6 +587,7 @@ try {
 
     $progressFile = Join-Path $runRoot "progress.jsonl"
     $logFile = Join-Path $runRoot "run.log"
+    $errFile = Join-Path $runRoot "run.err.log"
     $doneFlag = Join-Path $runRoot "done.flag"
     $worldLog = Join-Path $outDir "world_log.jsonl"
     if (Test-Path -LiteralPath $doneFlag) { Remove-Item -LiteralPath $doneFlag -Force -ErrorAction SilentlyContinue }
@@ -585,20 +599,30 @@ try {
     Write-Host ("Script: {0}" -f $rwePy) -ForegroundColor Green
     Write-Host ("Output: {0}" -f $outDir) -ForegroundColor Green
 
-    $runUiProc = Start-Process -FilePath $py -ArgumentList @(
+    $pyw = $null
+    try {
+        $cand = Join-Path (Split-Path -Parent $py) "pythonw.exe"
+        if (Test-Path -LiteralPath $cand) { $pyw = $cand }
+    } catch { }
+    if (-not $pyw) { $pyw = $py }
+
+    $runUiProc = Start-Process -FilePath $pyw -ArgumentList @(
         $runUiPy,
         "--run-root", $runRoot,
         "--out-dir", $outDir,
         "--progress-file", $progressFile,
         "--log-file", $logFile,
+        "--error-log", $errFile,
         "--world-log", $worldLog,
         "--done-flag", $doneFlag
     ) -PassThru
 
     Write-ProgressEvent -Path $progressFile -Phase "run" -Message "Generierung läuft..." -Percent 5
 
-    $runProc = Start-Process -FilePath $py -ArgumentList @($rwePy) -NoNewWindow -PassThru -Wait `
-        -RedirectStandardOutput $logFile -RedirectStandardError $logFile
+    Hide-ConsoleWindow
+
+    $runProc = Start-Process -FilePath $py -ArgumentList @($rwePy) -WindowStyle Hidden -PassThru -Wait `
+        -RedirectStandardOutput $logFile -RedirectStandardError $errFile
 
     Write-ProgressEvent -Path $progressFile -Phase "done" -Message "Generierung abgeschlossen." -Percent 100 -Close $true
     Set-Content -LiteralPath $doneFlag -Value "done" -Encoding UTF8
