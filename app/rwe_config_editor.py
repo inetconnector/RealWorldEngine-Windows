@@ -6,7 +6,7 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
-DEFAULT_GENESIS_URL = "https://de.wikipedia.org/wiki/Der_Kuss_(Klimt)#/media/Datei:The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg"
+DEFAULT_GENESIS_URL = "https://upload.wikimedia.org/wikipedia/commons/4/40/The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg"
 
 LIST_SECTIONS = [
     ("initial_words", "Initiale Motive"),
@@ -154,7 +154,7 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     genesis_style_row = ttk.Frame(genesis_frame)
     genesis_style_row.pack(anchor=tk.W, pady=(4, 8))
 
-    genesis_style_var = tk.BooleanVar(value=False)
+    genesis_style_var = tk.BooleanVar(value=True)
     genesis_style_cb = ttk.Checkbutton(genesis_style_row, text="Genesis als Stilvorlage (img2img) verwenden", variable=genesis_style_var)
     genesis_style_cb.pack(side=tk.LEFT)
 
@@ -223,17 +223,17 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
     iter_entry = ttk.Entry(runtime_row, textvariable=iter_var, width=10)
     iter_entry.pack(side=tk.LEFT, padx=(8, 0))
 
-size_row = ttk.Frame(runtime_frame)
-size_row.pack(anchor=tk.W, pady=(2, 8), fill=tk.X)
+    size_row = ttk.Frame(runtime_frame)
+    size_row.pack(anchor=tk.W, pady=(2, 8), fill=tk.X)
 
-ttk.Label(size_row, text="Bildgröße:").pack(side=tk.LEFT)
+    ttk.Label(size_row, text="Bildgröße:").pack(side=tk.LEFT)
 
-size_preset_var = tk.StringVar()
-size_options = ttk.Frame(size_row)
-size_options.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
+    size_preset_var = tk.StringVar()
+    size_options = ttk.Frame(size_row)
+    size_options.pack(side=tk.LEFT, padx=(12, 0), fill=tk.X, expand=True)
 
-for pid, label, w, h in SIZE_PRESETS:
-    ttk.Radiobutton(size_options, text=label, value=pid, variable=size_preset_var).pack(anchor=tk.W)
+    for pid, label, w, h in SIZE_PRESETS:
+        ttk.Radiobutton(size_options, text=label, value=pid, variable=size_preset_var).pack(anchor=tk.W)
 
 
     slideshow_frame = ttk.Frame(notebook, padding=12)
@@ -265,17 +265,17 @@ for pid, label, w, h in SIZE_PRESETS:
         iter_val = values.get("iterations", 10)
         iter_var.set(str(iter_val))
 
-w_val = values.get("width", 1024)
-h_val = values.get("height", 1024)
-preset_val = values.get("size_preset", "")
-if not preset_val:
-    for pid, _, pw, ph in SIZE_PRESETS:
-        if int(pw) == int(w_val) and int(ph) == int(h_val):
-            preset_val = pid
-            break
-if not preset_val:
-    preset_val = "standard_square"
-size_preset_var.set(preset_val)
+        w_val = values.get("width", 1024)
+        h_val = values.get("height", 1024)
+        preset_val = values.get("size_preset", "")
+        if not preset_val:
+            for pid, _, pw, ph in SIZE_PRESETS:
+                if int(pw) == int(w_val) and int(ph) == int(h_val):
+                    preset_val = pid
+                    break
+        if not preset_val:
+            preset_val = "standard_square"
+        size_preset_var.set(preset_val)
 
 
         slideshow_sec = source_cfg.get("slideshow", {})
@@ -295,13 +295,13 @@ size_preset_var.set(preset_val)
         genesis_kw = genesis_values.get("analysis_keywords", 12)
         genesis_kw_var.set(str(genesis_kw))
 
-        use_style = bool(genesis_values.get("use_style", False))
+        use_style = bool(genesis_values.get("use_style", True))
         genesis_style_var.set(use_style)
 
-        strength = genesis_values.get("strength", 0.55)
+        strength = genesis_values.get("style_strength", 0.55)
         genesis_strength_var.set(str(strength))
 
-        iters = genesis_values.get("iters", 4)
+        iters = genesis_values.get("style_iterations", 4)
         genesis_iters_var.set(str(iters))
 
         update_genesis_enabled_state()
@@ -347,23 +347,23 @@ size_preset_var.set(preset_val)
             return
         runtime_values["iterations"] = int(iter_text)
 
-sel_preset = (size_preset_var.get() or "").strip()
-if not sel_preset:
-    messagebox.showerror("Fehler", "Bitte eine Bildgröße auswählen.")
-    return
+        sel_preset = (size_preset_var.get() or "").strip()
+        if not sel_preset:
+            messagebox.showerror("Fehler", "Bitte eine Bildgröße auswählen.")
+            return
 
-match = None
-for pid, _, w, h in SIZE_PRESETS:
-    if pid == sel_preset:
-        match = (w, h)
-        break
-if match is None:
-    messagebox.showerror("Fehler", "Ungültige Bildgröße ausgewählt.")
-    return
+        match = None
+        for pid, _, w, h in SIZE_PRESETS:
+            if pid == sel_preset:
+                match = (w, h)
+                break
+        if match is None:
+            messagebox.showerror("Fehler", "Ungültige Bildgröße ausgewählt.")
+            return
 
-runtime_values["size_preset"] = sel_preset
-runtime_values["width"] = int(match[0])
-runtime_values["height"] = int(match[1])
+        runtime_values["size_preset"] = sel_preset
+        runtime_values["width"] = int(match[0])
+        runtime_values["height"] = int(match[1])
 
 
         slideshow_sec = updated.setdefault("slideshow", {})
@@ -421,13 +421,13 @@ runtime_values["height"] = int(match[1])
         if strength_val < 0.0 or strength_val > 1.0:
             messagebox.showerror("Fehler", "Stärke muss zwischen 0.0 und 1.0 liegen.")
             return
-        genesis_values["strength"] = strength_val
+        genesis_values["style_strength"] = strength_val
 
         iters_text = genesis_iters_var.get().strip()
         if not iters_text.isdigit() or int(iters_text) < 0:
             messagebox.showerror("Fehler", "Bitte eine gültige Zahl für Genesis-Iterationen eingeben.")
             return
-        genesis_values["iters"] = int(iters_text)
+        genesis_values["style_iterations"] = int(iters_text)
 
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(updated, f, ensure_ascii=False, indent=2)

@@ -519,7 +519,6 @@ try {
     $launch = Read-LaunchOptions -Path $launchOut
     if (-not $launch -or -not $launch.run_root) {
         Write-Host "Launcher closed without starting a run." -ForegroundColor Yellow
-        Wait-ForEnter "Press Enter to exit..."
         return
     }
 
