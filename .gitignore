@@ -13,4 +13,6 @@ cache/
 
 # Optional: Python bytecode
 *.log
+*.pyc
+__pycache__/
 bootstrap_progress.jsonl
