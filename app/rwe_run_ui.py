@@ -90,16 +90,26 @@ class UiState:
     done: bool = False
 
 class RweRunUi(tk.Tk):
-    def __init__(self, run_root: str, out_dir: str, progress_file: str, log_file: str, world_log_jsonl: str, done_flag: str):
+    def __init__(
+        self,
+        run_root: str,
+        out_dir: str,
+        progress_file: str,
+        log_file: str,
+        error_log_file: str,
+        world_log_jsonl: str,
+        done_flag: str,
+    ):
         super().__init__()
         self.title("RealWorldEngine — Run")
-        self.geometry("1200x780")
+        self.geometry("1280x820")
         self.minsize(1100, 700)
 
         self.run_root = run_root
         self.out_dir = out_dir
         self.progress_file = progress_file
         self.log_file = log_file
+        self.error_log_file = error_log_file
         self.world_log_jsonl = world_log_jsonl
         self.done_flag = done_flag
 
@@ -108,11 +118,55 @@ class RweRunUi(tk.Tk):
         self._img_tk = None
         self._last_img_loaded = ""
 
+        self._configure_window()
+        self._configure_style()
         self._build_ui()
         self._stop = threading.Event()
         self._poll()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _configure_window(self) -> None:
+        try:
+            self.state("zoomed")
+        except Exception:
+            pass
+        try:
+            self.attributes("-fullscreen", True)
+        except Exception:
+            pass
+        try:
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+
+    def _configure_style(self) -> None:
+        style = ttk.Style(self)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        bg = "#0f1115"
+        panel = "#161a22"
+        accent = "#4cc3ff"
+        text = "#e6edf7"
+        muted = "#9aa4b2"
+
+        self.configure(bg=bg)
+        style.configure("TFrame", background=bg)
+        style.configure("Card.TFrame", background=panel)
+        style.configure("TLabel", background=bg, foreground=text)
+        style.configure("Muted.TLabel", background=bg, foreground=muted)
+        style.configure("Title.TLabel", background=bg, foreground=text, font=("Segoe UI", 16, "bold"))
+        style.configure("Section.TLabel", background=bg, foreground=text, font=("Segoe UI", 12, "bold"))
+        style.configure("TProgressbar", background=accent, troughcolor="#202635", bordercolor="#202635")
+
+        self._ui_colors = {
+            "bg": bg,
+            "panel": panel,
+            "accent": accent,
+            "text": text,
+            "muted": muted,
+        }
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -122,10 +176,10 @@ class RweRunUi(tk.Tk):
         top.grid(row=0, column=0, sticky="nsew")
         top.columnconfigure(1, weight=1)
 
-        self.lbl_phase = ttk.Label(top, text="Initializing…", font=("Segoe UI", 14, "bold"))
+        self.lbl_phase = ttk.Label(top, text="Initializing…", style="Title.TLabel")
         self.lbl_phase.grid(row=0, column=0, sticky="w")
 
-        self.lbl_msg = ttk.Label(top, text="", font=("Segoe UI", 10))
+        self.lbl_msg = ttk.Label(top, text="", style="Muted.TLabel")
         self.lbl_msg.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.pbar = ttk.Progressbar(top, orient="horizontal", length=400, mode="determinate")
@@ -134,45 +188,78 @@ class RweRunUi(tk.Tk):
 
         body = ttk.Frame(self, padding=(12, 0, 12, 12))
         body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=3)
-        body.columnconfigure(1, weight=2)
+        body.columnconfigure(0, weight=2)
+        body.columnconfigure(1, weight=3)
         body.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(body)
+        left = ttk.Frame(body, style="Card.TFrame")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
-        title = ttk.Label(left, text="Latest image", font=("Segoe UI", 12, "bold"))
+        title = ttk.Label(left, text="Latest image", style="Section.TLabel")
         title.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        self.canvas = tk.Canvas(left, highlightthickness=1)
+        self.canvas = tk.Canvas(left, highlightthickness=0, background=self._ui_colors["panel"])
         self.canvas.grid(row=1, column=0, sticky="nsew")
 
-        right = ttk.Frame(body)
+        right = ttk.Frame(body, style="Card.TFrame")
         right.grid(row=0, column=1, sticky="nsew")
-        right.rowconfigure(3, weight=1)
+        right.rowconfigure(1, weight=1)
+        right.rowconfigure(3, weight=4)
         right.columnconfigure(0, weight=1)
 
-        info_title = ttk.Label(right, text="Details", font=("Segoe UI", 12, "bold"))
+        info_title = ttk.Label(right, text="Details", style="Section.TLabel")
         info_title.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        self.txt_details = tk.Text(right, height=10, wrap="word")
+        self.txt_details = tk.Text(
+            right,
+            height=10,
+            wrap="word",
+            background=self._ui_colors["panel"],
+            foreground=self._ui_colors["text"],
+            insertbackground=self._ui_colors["text"],
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground="#202635",
+            highlightcolor=self._ui_colors["accent"],
+            font=("Segoe UI", 10),
+        )
         self.txt_details.grid(row=1, column=0, sticky="nsew")
         self.txt_details.configure(state="disabled")
 
-        log_title = ttk.Label(right, text="Live log", font=("Segoe UI", 12, "bold"))
+        log_title = ttk.Label(right, text="Live log", style="Section.TLabel")
         log_title.grid(row=2, column=0, sticky="w", pady=(10, 6))
 
-        self.txt_log = tk.Text(right, wrap="none")
-        self.txt_log.grid(row=3, column=0, sticky="nsew")
+        log_frame = ttk.Frame(right, style="Card.TFrame")
+        log_frame.grid(row=3, column=0, sticky="nsew")
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+
+        self.txt_log = tk.Text(
+            log_frame,
+            wrap="none",
+            background="#0b0f14",
+            foreground="#d6e0ff",
+            insertbackground="#d6e0ff",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground="#202635",
+            highlightcolor=self._ui_colors["accent"],
+            font=("Cascadia Mono", 10),
+        )
+        self.txt_log.grid(row=0, column=0, sticky="nsew")
         self.txt_log.configure(state="disabled")
+
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.txt_log.yview)
+        log_scroll.grid(row=0, column=1, sticky="ns")
+        self.txt_log.configure(yscrollcommand=log_scroll.set)
 
         bottom = ttk.Frame(self, padding=(12, 0, 12, 12))
         bottom.grid(row=2, column=0, sticky="nsew")
         bottom.columnconfigure(0, weight=1)
 
-        self.lbl_path = ttk.Label(bottom, text="")
+        self.lbl_path = ttk.Label(bottom, text="", style="Muted.TLabel")
         self.lbl_path.grid(row=0, column=0, sticky="w")
 
     def _on_close(self) -> None:
@@ -258,11 +345,20 @@ class RweRunUi(tk.Tk):
 
     def _read_log_tail(self, max_chars: int = 40_000) -> str:
         txt = _safe_read_text(self.log_file, max_bytes=2_000_000)
-        if not txt:
+        err = _safe_read_text(self.error_log_file, max_bytes=1_000_000)
+        combined = ""
+        if txt:
+            combined += txt
+        if err:
+            if combined and not combined.endswith("\n"):
+                combined += "\n"
+            combined += "\n[stderr]\n"
+            combined += err
+        if not combined:
             return ""
-        if len(txt) > max_chars:
-            return txt[-max_chars:]
-        return txt
+        if len(combined) > max_chars:
+            return combined[-max_chars:]
+        return combined
 
     def _poll(self) -> None:
         if self._stop.is_set():
@@ -287,6 +383,7 @@ class RweRunUi(tk.Tk):
 
         log_tail = self._read_log_tail()
         self._set_text(self.txt_log, log_tail)
+        self.txt_log.see("end")
 
         if self.done_flag and os.path.exists(self.done_flag):
             self.state.done = True
@@ -301,6 +398,7 @@ def main() -> int:
     ap.add_argument("--log-file", required=True)
     ap.add_argument("--world-log", required=True)
     ap.add_argument("--done-flag", required=True)
+    ap.add_argument("--error-log", default="")
     args = ap.parse_args()
 
     ui = RweRunUi(
@@ -308,6 +406,7 @@ def main() -> int:
         out_dir=args.out_dir,
         progress_file=args.progress_file,
         log_file=args.log_file,
+        error_log_file=args.error_log,
         world_log_jsonl=args.world_log,
         done_flag=args.done_flag,
     )
