@@ -3,8 +3,11 @@ import json
 import os
 import sys
 import subprocess
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+DEFAULT_GENESIS_URL = "https://upload.wikimedia.org/wikipedia/commons/4/40/The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg"
 
 def load_json(path: str) -> dict:
     try:
@@ -44,6 +47,30 @@ def find_latest_run_folder(script_dir: str) -> str:
     except Exception:
         pass
     return ""
+
+def list_run_folders(script_dir: str) -> list[str]:
+    runs: list[str] = []
+    try:
+        date_dirs = []
+        for name in os.listdir(script_dir):
+            p = os.path.join(script_dir, name)
+            if os.path.isdir(p) and len(name) == 10 and name[4] == "-" and name[7] == "-":
+                date_dirs.append(p)
+        date_dirs.sort(reverse=True)
+        for d in date_dirs:
+            sub_runs = []
+            for name in os.listdir(d):
+                p = os.path.join(d, name)
+                if os.path.isdir(p) and name.startswith("run-") and len(name) == 19:
+                    sub_runs.append(p)
+            sub_runs.sort(reverse=True)
+            for r in sub_runs:
+                out_dir = os.path.join(r, "outputs")
+                if os.path.exists(os.path.join(out_dir, "world_state.json")) or os.path.exists(os.path.join(out_dir, "world_log.jsonl")):
+                    runs.append(r)
+    except Exception:
+        pass
+    return runs
 
 def new_run_folder(script_dir: str) -> str:
     import datetime
@@ -117,48 +144,38 @@ def main() -> int:
     form.pack(fill=tk.BOTH, expand=True)
 
     def row(parent, r: int, label: str):
-        ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=6, padx=(0, 12))
-        return r
+        lbl = ttk.Label(parent, text=label)
+        lbl.grid(row=r, column=0, sticky="w", pady=6, padx=(0, 12))
+        return lbl
 
+    run_folders = list_run_folders(script_dir)
     resume_var = tk.BooleanVar(value=False)
-    runfolder_var = tk.StringVar(value="")
+    runfolder_var = tk.StringVar(value=run_folders[0] if run_folders else "")
     iters_default = int(read_cfg_value(run_cfg, "runtime_defaults.values.iterations", 10) or 10)
     iters_var = tk.StringVar(value=str(iters_default))
     hf_var = tk.StringVar(value="")
     backend_var = tk.StringVar(value="auto")
     show_images_var = tk.BooleanVar(value=False)
 
-    genesis_url_var = tk.StringVar(value=str(read_cfg_value(run_cfg, "genesis_image.values.url", "") or ""))
-    use_style_var = tk.BooleanVar(value=bool(read_cfg_value(run_cfg, "genesis_image.values.use_as_style", False)))
+    genesis_enabled_var = tk.BooleanVar(value=bool(read_cfg_value(run_cfg, "genesis_image.values.enabled", False)))
+    genesis_url_var = tk.StringVar(value=str(read_cfg_value(run_cfg, "genesis_image.values.url", DEFAULT_GENESIS_URL) or DEFAULT_GENESIS_URL))
+    initial_words_val = read_cfg_value(run_cfg, "initial_words.values", [])
+    if not isinstance(initial_words_val, list):
+        initial_words_val = []
+    genesis_words_var = tk.StringVar(value=", ".join(str(w).strip() for w in initial_words_val if str(w).strip()))
+    use_style_var = tk.BooleanVar(value=bool(read_cfg_value(run_cfg, "genesis_image.values.use_style", True)))
     style_strength_var = tk.StringVar(value=str(read_cfg_value(run_cfg, "genesis_image.values.style_strength", 0.55)))
     style_iters_var = tk.StringVar(value=str(read_cfg_value(run_cfg, "genesis_image.values.style_iterations", 3)))
 
     r = 0
     row(form, r, "Resume previous run")
-    ttk.Checkbutton(form, variable=resume_var).grid(row=r, column=1, sticky="w")
+    resume_cb = ttk.Checkbutton(form, variable=resume_var)
+    resume_cb.grid(row=r, column=1, sticky="w")
     r += 1
 
-    row(form, r, "Run folder")
-    run_entry = ttk.Entry(form, textvariable=runfolder_var, width=90)
+    runfolder_label = row(form, r, "Run folder")
+    run_entry = ttk.Combobox(form, textvariable=runfolder_var, width=88, values=run_folders, state="readonly")
     run_entry.grid(row=r, column=1, sticky="we")
-
-    def browse_run():
-        p = filedialog.askdirectory(initialdir=script_dir, title="Select run folder")
-        if p:
-            runfolder_var.set(p)
-
-    def use_latest():
-        p = find_latest_run_folder(script_dir)
-        if not p:
-            messagebox.showinfo("Resume", "Kein vorheriger Run gefunden.")
-            return
-        runfolder_var.set(p)
-        resume_var.set(True)
-
-    btns = ttk.Frame(form)
-    btns.grid(row=r, column=2, sticky="e", padx=(12, 0))
-    ttk.Button(btns, text="Browse…", command=browse_run).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Button(btns, text="Latest", command=use_latest).pack(side=tk.LEFT)
     r += 1
 
     row(form, r, "Iterations")
@@ -181,21 +198,67 @@ def main() -> int:
     sep.grid(row=r, column=0, columnspan=3, sticky="we", pady=14)
     r += 1
 
+    row(form, r, "Use genesis image")
+    ttk.Checkbutton(form, variable=genesis_enabled_var).grid(row=r, column=1, sticky="w")
+    r += 1
+
     row(form, r, "Genesis image URL (optional)")
-    ttk.Entry(form, textvariable=genesis_url_var, width=90).grid(row=r, column=1, sticky="we")
+    genesis_url_entry = ttk.Entry(form, textvariable=genesis_url_var, width=86)
+    genesis_url_entry.grid(row=r, column=1, sticky="we")
+
+    def browse_genesis_image():
+        path = filedialog.askopenfilename(
+            title="Select genesis image",
+            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.tiff"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            file_url = Path(path).resolve().as_uri()
+        except Exception:
+            file_url = path
+        genesis_url_var.set(file_url)
+        genesis_enabled_var.set(True)
+
+    genesis_btns = ttk.Frame(form)
+    genesis_btns.grid(row=r, column=2, sticky="e", padx=(12, 0))
+    ttk.Button(genesis_btns, text="Local…", command=browse_genesis_image).pack(side=tk.LEFT)
+    r += 1
+
+    row(form, r, "Genesis words (comma-separated)")
+    genesis_words_entry = ttk.Entry(form, textvariable=genesis_words_var, width=90)
+    genesis_words_entry.grid(row=r, column=1, sticky="we")
     r += 1
 
     row(form, r, "Use genesis as style (Img2Img)")
-    ttk.Checkbutton(form, variable=use_style_var).grid(row=r, column=1, sticky="w")
+    use_style_cb = ttk.Checkbutton(form, variable=use_style_var)
+    use_style_cb.grid(row=r, column=1, sticky="w")
     r += 1
 
     row(form, r, "Style strength (0.0 - 1.0)")
-    ttk.Entry(form, textvariable=style_strength_var, width=10).grid(row=r, column=1, sticky="w")
+    style_strength_entry = ttk.Entry(form, textvariable=style_strength_var, width=10)
+    style_strength_entry.grid(row=r, column=1, sticky="w")
     r += 1
 
     row(form, r, "Style iterations (count)")
-    ttk.Entry(form, textvariable=style_iters_var, width=10).grid(row=r, column=1, sticky="w")
+    style_iters_entry = ttk.Entry(form, textvariable=style_iters_var, width=10)
+    style_iters_entry.grid(row=r, column=1, sticky="w")
     r += 1
+
+    def update_genesis_state() -> None:
+        enabled = bool(genesis_enabled_var.get())
+        state = "normal" if enabled else "disabled"
+        genesis_url_entry.configure(state=state)
+        use_style_cb.configure(state=state)
+        style_state = "normal" if (enabled and use_style_var.get()) else "disabled"
+        genesis_words_entry.configure(state="disabled" if enabled else "normal")
+        if enabled and not genesis_url_var.get().strip():
+            genesis_url_var.set(DEFAULT_GENESIS_URL)
+        style_strength_entry.configure(state=style_state)
+        style_iters_entry.configure(state=style_state)
+
+    genesis_enabled_var.trace_add("write", lambda *_: update_genesis_state())
+    use_style_var.trace_add("write", lambda *_: update_genesis_state())
 
     form.columnconfigure(1, weight=1)
 
@@ -249,12 +312,13 @@ def main() -> int:
         if not isinstance(values, dict):
             values = {}
             gi["values"] = values
-        values["url"] = genesis_url_var.get().strip()
+        values["enabled"] = bool(genesis_enabled_var.get())
+        values["url"] = genesis_url_var.get().strip() if values["enabled"] else ""
         try:
             values["analysis_keywords"] = int(read_cfg_value(cfg, "genesis_image.values.analysis_keywords", 12) or 12)
         except Exception:
             values["analysis_keywords"] = 12
-        values["use_as_style"] = bool(use_style_var.get())
+        values["use_style"] = bool(use_style_var.get())
         try:
             st = float(style_strength_var.get().strip().replace(",", "."))
         except Exception:
@@ -267,6 +331,14 @@ def main() -> int:
             si = 3
         si = max(1, min(9999, si))
         values["style_iterations"] = si
+
+        words_raw = genesis_words_var.get().strip()
+        words_list = [w.strip() for w in words_raw.split(",") if w.strip()]
+        initial_sec = cfg.setdefault("initial_words", {})
+        if not isinstance(initial_sec, dict):
+            initial_sec = {}
+            cfg["initial_words"] = initial_sec
+        initial_sec["values"] = words_list
 
         save_json(config_run, cfg)
 
@@ -293,7 +365,12 @@ def main() -> int:
     def on_esc(_ev=None):
         cancel()
 
+    if not run_folders:
+        run_entry.grid_remove()
+        runfolder_label.grid_remove()
+        resume_cb.configure(state="disabled")
     root.bind("<Escape>", on_esc)
+    update_genesis_state()
     root.mainloop()
     return 0
 

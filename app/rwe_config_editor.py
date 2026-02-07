@@ -6,7 +6,7 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
-DEFAULT_GENESIS_URL = "https://de.wikipedia.org/wiki/Der_Kuss_(Klimt)#/media/Datei:The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg"
+DEFAULT_GENESIS_URL = "https://upload.wikimedia.org/wikipedia/commons/4/40/The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg"
 
 LIST_SECTIONS = [
     ("initial_words", "Initial Motifs"),
@@ -311,13 +311,13 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
         genesis_kw = genesis_values.get("analysis_keywords", 12)
         genesis_kw_var.set(str(genesis_kw))
 
-        use_style = bool(genesis_values.get("use_style", False))
+        use_style = bool(genesis_values.get("use_style", True))
         genesis_style_var.set(use_style)
 
-        strength = genesis_values.get("strength", 0.55)
+        strength = genesis_values.get("style_strength", 0.55)
         genesis_strength_var.set(str(strength))
 
-        iters = genesis_values.get("iters", 4)
+        iters = genesis_values.get("style_iterations", 4)
         genesis_iters_var.set(str(iters))
 
         update_genesis_enabled_state()
@@ -437,13 +437,13 @@ def build_ui(cfg_path: str, default_cfg: dict, cfg: dict, outputs_dir: str) -> N
         if strength_val < 0.0 or strength_val > 1.0:
             messagebox.showerror("Error", "Strength must be between 0.0 and 1.0.")
             return
-        genesis_values["strength"] = strength_val
+        genesis_values["style_strength"] = strength_val
 
         iters_text = genesis_iters_var.get().strip()
         if not iters_text.isdigit() or int(iters_text) < 0:
             messagebox.showerror("Error", "Please enter a valid number for genesis iterations.")
             return
-        genesis_values["iters"] = int(iters_text)
+        genesis_values["style_iterations"] = int(iters_text)
 
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(updated, f, ensure_ascii=False, indent=2)
