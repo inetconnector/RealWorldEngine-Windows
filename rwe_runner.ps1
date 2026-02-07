@@ -731,7 +731,7 @@ function New-RunFolderNextToScript {
     return $run
 }
 
-# FIXED: Non-blocking process streaming (avoids hanging when child process writes no newline output)
+# FIXED: Non-blocking process streaming (handles carriage-return progress output like tqdm)
 function Invoke-ProcessStreamingToProgress {
     param(
         [Parameter(Mandatory=$true)][string]$FilePath,
@@ -756,27 +756,60 @@ function Invoke-ProcessStreamingToProgress {
 
     $q = New-Object System.Collections.Concurrent.ConcurrentQueue[string]
 
-    $outHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $e)
-        if ($e -and $e.Data -ne $null -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
-            $q.Enqueue($e.Data)
-        }
-    }
-
-    $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $e)
-        if ($e -and $e.Data -ne $null -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
-            $q.Enqueue($e.Data)
-        }
-    }
-
-    $p.add_OutputDataReceived($outHandler)
-    $p.add_ErrorDataReceived($errHandler)
-
     $null = $p.Start()
 
-    $p.BeginOutputReadLine()
-    $p.BeginErrorReadLine()
+    $reader = {
+        param(
+            [System.IO.Stream]$Stream,
+            [System.Text.Encoding]$Encoding,
+            [System.Collections.Concurrent.ConcurrentQueue[string]]$Queue
+        )
+        $buffer = New-Object byte[] 4096
+        $sb = New-Object System.Text.StringBuilder
+        while ($true) {
+            $read = $Stream.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) { break }
+            $text = $Encoding.GetString($buffer, 0, $read)
+            foreach ($ch in $text.ToCharArray()) {
+                if ($ch -eq "`r" -or $ch -eq "`n") {
+                    if ($sb.Length -gt 0) {
+                        $Queue.Enqueue($sb.ToString())
+                        $null = $sb.Clear()
+                    }
+                } else {
+                    $null = $sb.Append($ch)
+                }
+            }
+        }
+        if ($sb.Length -gt 0) { $Queue.Enqueue($sb.ToString()) }
+    }
+
+    $enc = [System.Text.Encoding]::UTF8
+    try {
+        if ($p.StartInfo.StandardOutputEncoding) { $enc = $p.StartInfo.StandardOutputEncoding }
+    } catch { }
+
+    $startReaderThread = {
+        param(
+            [System.IO.Stream]$Stream,
+            [System.Text.Encoding]$Encoding,
+            [System.Collections.Concurrent.ConcurrentQueue[string]]$Queue
+        )
+        & $reader $Stream $Encoding $Queue
+    }
+
+    $outThread = New-Object System.Threading.Thread([System.Threading.ParameterizedThreadStart]{
+        param($state)
+        & $startReaderThread $state[0] $state[1] $state[2]
+    })
+    $errThread = New-Object System.Threading.Thread([System.Threading.ParameterizedThreadStart]{
+        param($state)
+        & $startReaderThread $state[0] $state[1] $state[2]
+    })
+    $outThread.IsBackground = $true
+    $errThread.IsBackground = $true
+    $outThread.Start(@($p.StandardOutput.BaseStream, $enc, $q))
+    $errThread.Start(@($p.StandardError.BaseStream, $enc, $q))
 
     $lastUiTs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $lastOutputMs = $lastUiTs
@@ -835,9 +868,8 @@ function Invoke-ProcessStreamingToProgress {
     }
 
     $p.WaitForExit()
-
-    try { $p.remove_OutputDataReceived($outHandler) } catch { }
-    try { $p.remove_ErrorDataReceived($errHandler) } catch { }
+    try { $outThread.Join(2000) } catch { }
+    try { $errThread.Join(2000) } catch { }
 
     if ($p.ExitCode -ne 0) {
         throw ("Process failed: {0} (ExitCode={1})" -f $FilePath, $p.ExitCode)
@@ -1098,15 +1130,19 @@ try {
         try { Remove-Item -LiteralPath $prefetchLog -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
 
         $env:RWE_PROGRESS = $progressFile
+        $prevPyUnbuffered = $env:PYTHONUNBUFFERED
+        $env:PYTHONUNBUFFERED = "1"
 
         Invoke-ProcessStreamingToProgress `
             -FilePath $py `
-            -ArgumentList @("`"$prefetchPy`"", "--progress", "`"$progressFile`"") `
+            -ArgumentList @("-u", "`"$prefetchPy`"", "--progress", "`"$progressFile`"") `
             -ProgressFile $progressFile `
             -Percent 72 `
             -Phase "prefetch" `
             -LogFile $prefetchLog
 
+        if ($null -ne $prevPyUnbuffered) { $env:PYTHONUNBUFFERED = $prevPyUnbuffered }
+        else { if (Test-Path Env:\PYTHONUNBUFFERED) { Remove-Item Env:\PYTHONUNBUFFERED -ErrorAction SilentlyContinue } }
         if (Test-Path Env:\RWE_PROGRESS) { Remove-Item Env:\RWE_PROGRESS -ErrorAction SilentlyContinue }
     }
 
