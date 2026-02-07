@@ -720,6 +720,35 @@ function Apply-HFTokenFromFile {
     } catch { }
 }
 
+function Get-HFHubCacheDir {
+    $cache = $env:HUGGINGFACE_HUB_CACHE
+    if (-not [string]::IsNullOrWhiteSpace($cache)) { return $cache }
+
+    $hfHome = $env:HF_HOME
+    if (-not [string]::IsNullOrWhiteSpace($hfHome)) {
+        return (Join-Path $hfHome "hub")
+    }
+
+    $userProfile = $env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace($userProfile)) { return $null }
+    return (Join-Path (Join-Path $userProfile ".cache\\huggingface") "hub")
+}
+
+function Get-HFCacheDownloadBytes {
+    param([string]$CacheDir)
+    if ([string]::IsNullOrWhiteSpace($CacheDir)) { return 0 }
+    if (-not (Test-Path -LiteralPath $CacheDir)) { return 0 }
+    try {
+        $total = 0
+        Get-ChildItem -LiteralPath $CacheDir -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '\.(incomplete|tmp|part)$' } |
+            ForEach-Object { $total += $_.Length }
+        return $total
+    } catch {
+        return 0
+    }
+}
+
 function New-RunFolderNextToScript {
     param([string]$ScriptDir)
     $dateStamp = (Get-Date).ToString("yyyy-MM-dd")
@@ -731,7 +760,7 @@ function New-RunFolderNextToScript {
     return $run
 }
 
-# FIXED: Non-blocking process streaming (avoids hanging when child process writes no newline output)
+# FIXED: Non-blocking process streaming (handles carriage-return progress output like tqdm)
 function Invoke-ProcessStreamingToProgress {
     param(
         [Parameter(Mandatory=$true)][string]$FilePath,
@@ -739,7 +768,8 @@ function Invoke-ProcessStreamingToProgress {
         [Parameter(Mandatory=$true)][string]$ProgressFile,
         [Parameter(Mandatory=$true)][double]$Percent,
         [Parameter(Mandatory=$true)][string]$Phase,
-        [string]$LogFile = ""
+        [string]$LogFile = "",
+        [scriptblock]$HeartbeatInfo = $null
     )
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -756,27 +786,60 @@ function Invoke-ProcessStreamingToProgress {
 
     $q = New-Object System.Collections.Concurrent.ConcurrentQueue[string]
 
-    $outHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $e)
-        if ($e -and $e.Data -ne $null -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
-            $q.Enqueue($e.Data)
-        }
-    }
-
-    $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $e)
-        if ($e -and $e.Data -ne $null -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
-            $q.Enqueue($e.Data)
-        }
-    }
-
-    $p.add_OutputDataReceived($outHandler)
-    $p.add_ErrorDataReceived($errHandler)
-
     $null = $p.Start()
 
-    $p.BeginOutputReadLine()
-    $p.BeginErrorReadLine()
+    $reader = {
+        param(
+            [System.IO.Stream]$Stream,
+            [System.Text.Encoding]$Encoding,
+            [System.Collections.Concurrent.ConcurrentQueue[string]]$Queue
+        )
+        $buffer = New-Object byte[] 4096
+        $sb = New-Object System.Text.StringBuilder
+        while ($true) {
+            $read = $Stream.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) { break }
+            $text = $Encoding.GetString($buffer, 0, $read)
+            foreach ($ch in $text.ToCharArray()) {
+                if ($ch -eq "`r" -or $ch -eq "`n") {
+                    if ($sb.Length -gt 0) {
+                        $Queue.Enqueue($sb.ToString())
+                        $null = $sb.Clear()
+                    }
+                } else {
+                    $null = $sb.Append($ch)
+                }
+            }
+        }
+        if ($sb.Length -gt 0) { $Queue.Enqueue($sb.ToString()) }
+    }
+
+    $enc = [System.Text.Encoding]::UTF8
+    try {
+        if ($p.StartInfo.StandardOutputEncoding) { $enc = $p.StartInfo.StandardOutputEncoding }
+    } catch { }
+
+    $startReaderThread = {
+        param(
+            [System.IO.Stream]$Stream,
+            [System.Text.Encoding]$Encoding,
+            [System.Collections.Concurrent.ConcurrentQueue[string]]$Queue
+        )
+        & $reader $Stream $Encoding $Queue
+    }
+
+    $outThread = New-Object System.Threading.Thread([System.Threading.ParameterizedThreadStart]{
+        param($state)
+        & $startReaderThread $state[0] $state[1] $state[2]
+    })
+    $errThread = New-Object System.Threading.Thread([System.Threading.ParameterizedThreadStart]{
+        param($state)
+        & $startReaderThread $state[0] $state[1] $state[2]
+    })
+    $outThread.IsBackground = $true
+    $errThread.IsBackground = $true
+    $outThread.Start(@($p.StandardOutput.BaseStream, $enc, $q))
+    $errThread.Start(@($p.StandardError.BaseStream, $enc, $q))
 
     $lastUiTs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $lastOutputMs = $lastUiTs
@@ -814,7 +877,11 @@ function Invoke-ProcessStreamingToProgress {
                 if (-not [string]::IsNullOrWhiteSpace($LogFile)) {
                     $logHint = " See " + [System.IO.Path]::GetFileName($LogFile) + "."
                 }
-                $msg = ("Still working... no output for {0}s.{1}" -f $noOutputSec, $logHint)
+                $extra = ""
+                if ($HeartbeatInfo) {
+                    try { $extra = & $HeartbeatInfo } catch { $extra = "" }
+                }
+                $msg = ("Still working... no output for {0}s.{1}{2}" -f $noOutputSec, $logHint, $extra)
                 Write-ProgressEvent -ProgressFile $ProgressFile -Percent $Percent -Message $msg -Phase $Phase
                 $lastHeartbeatMs = $nowMs
                 $lastUiTs = $nowMs
@@ -835,9 +902,8 @@ function Invoke-ProcessStreamingToProgress {
     }
 
     $p.WaitForExit()
-
-    try { $p.remove_OutputDataReceived($outHandler) } catch { }
-    try { $p.remove_ErrorDataReceived($errHandler) } catch { }
+    try { $outThread.Join(2000) } catch { }
+    try { $errThread.Join(2000) } catch { }
 
     if ($p.ExitCode -ne 0) {
         throw ("Process failed: {0} (ExitCode={1})" -f $FilePath, $p.ExitCode)
@@ -1098,15 +1164,27 @@ try {
         try { Remove-Item -LiteralPath $prefetchLog -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
 
         $env:RWE_PROGRESS = $progressFile
+        $prevPyUnbuffered = $env:PYTHONUNBUFFERED
+        $env:PYTHONUNBUFFERED = "1"
 
+        $hfCacheDir = Get-HFHubCacheDir
         Invoke-ProcessStreamingToProgress `
             -FilePath $py `
-            -ArgumentList @("`"$prefetchPy`"", "--progress", "`"$progressFile`"") `
+            -ArgumentList @("-u", "`"$prefetchPy`"", "--progress", "`"$progressFile`"") `
             -ProgressFile $progressFile `
             -Percent 72 `
             -Phase "prefetch" `
-            -LogFile $prefetchLog
+            -LogFile $prefetchLog `
+            -HeartbeatInfo {
+                $bytes = Get-HFCacheDownloadBytes -CacheDir $hfCacheDir
+                if ($bytes -gt 0) {
+                    return (" Downloaded so far: {0} MB" -f [Math]::Round(($bytes / 1MB), 1))
+                }
+                return ""
+            }
 
+        if ($null -ne $prevPyUnbuffered) { $env:PYTHONUNBUFFERED = $prevPyUnbuffered }
+        else { if (Test-Path Env:\PYTHONUNBUFFERED) { Remove-Item Env:\PYTHONUNBUFFERED -ErrorAction SilentlyContinue } }
         if (Test-Path Env:\RWE_PROGRESS) { Remove-Item Env:\RWE_PROGRESS -ErrorAction SilentlyContinue }
     }
 
