@@ -21,12 +21,12 @@ if "%NEEDS_INSTALL%"=="1" (
   echo Installation required. Cleaning venv/cache and running installer...
   if exist "%VENV_DIR%" rmdir /s /q "%VENV_DIR%"
   if exist "%CACHE_DIR%" rmdir /s /q "%CACHE_DIR%"
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%"
+  start "" /min /wait powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%"
   if errorlevel 1 (
     echo Installer failed. Aborting.
     exit /b 1
   )
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNNER%"
+start "" /min /wait powershell -NoProfile -ExecutionPolicy Bypass -File "%RUNNER%"
 endlocal

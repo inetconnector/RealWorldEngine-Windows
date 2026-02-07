@@ -482,6 +482,30 @@ function Write-ProgressEvent {
     ($obj | ConvertTo-Json -Compress) | Add-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Read-UiAction {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return "" }
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        if ($obj -and $obj.action) { return [string]$obj.action }
+    } catch { }
+    return ""
+}
+
+function Stop-ProcessSafe {
+    param([System.Diagnostics.Process]$Proc)
+    if (-not $Proc) { return }
+    try { $Proc.Refresh() } catch { }
+    if ($Proc.HasExited) { return }
+    try { $Proc.CloseMainWindow() | Out-Null } catch { }
+    Start-Sleep -Milliseconds 500
+    try { $Proc.Refresh() } catch { }
+    if (-not $Proc.HasExited) {
+        try { Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
 try {
     Assert-Or-Elevate
 
@@ -526,128 +550,172 @@ try {
     $runConfigShared = Join-Path $scriptDir "rwe_config_run.json"
     $launchOut = Join-Path $scriptDir "last_launch.json"
 
-    Write-Section "Launcher"
-    & $py $launcherPy --script-dir $scriptDir --config-default $configPath --config-run $runConfigShared --python $py --launch-out $launchOut
+    $keepRunning = $true
+    while ($keepRunning) {
+        Write-Section "Launcher"
+        & $py $launcherPy --script-dir $scriptDir --config-default $configPath --config-run $runConfigShared --python $py --launch-out $launchOut
 
-    $launch = Read-LaunchOptions -Path $launchOut
-    if (-not $launch -or -not $launch.run_root) {
-        Write-Host "Launcher closed without starting a run." -ForegroundColor Yellow
-        return
-    }
-
-    $runRoot = $launch.run_root
-    if (-not (Test-Path -LiteralPath $runRoot)) { throw ("Run folder not found: {0}" -f $runRoot) }
-
-    $outDir   = Join-Path $runRoot "outputs"
-    Ensure-Folder $outDir
-
-    $runConfig = Join-Path $runRoot "rwe_config.json"
-    if (Test-Path -LiteralPath $runConfigShared) {
-        Copy-FileSafe -Src $runConfigShared -Dst $runConfig
-    } elseif (-not (Test-Path -LiteralPath $runConfig)) {
-        Copy-FileSafe -Src $configPath -Dst $runConfig
-    }
-
-    Write-DetectedHardwareInfo
-    $backendFile = Join-Path $scriptDir "rwe_backend.txt"
-    $backendPref = $launch.backend
-    if ([string]::IsNullOrWhiteSpace($backendPref)) { $backendPref = "auto" }
-    if ($backendPref -eq "auto") {
-        if (Test-Path -LiteralPath $backendFile) {
-            $backendPref = (Get-Content -LiteralPath $backendFile -Raw -ErrorAction SilentlyContinue).Trim()
+        $launch = Read-LaunchOptions -Path $launchOut
+        if (-not $launch -or -not $launch.run_root) {
+            Write-Host "Launcher closed without starting a run." -ForegroundColor Yellow
+            break
         }
-        if ([string]::IsNullOrWhiteSpace($backendPref)) {
-            $backendPref = Get-PreferredBackend
+
+        $runRoot = $launch.run_root
+        if (-not (Test-Path -LiteralPath $runRoot)) { throw ("Run folder not found: {0}" -f $runRoot) }
+
+        $outDir   = Join-Path $runRoot "outputs"
+        Ensure-Folder $outDir
+
+        $runConfig = Join-Path $runRoot "rwe_config.json"
+        if (Test-Path -LiteralPath $runConfigShared) {
+            Copy-FileSafe -Src $runConfigShared -Dst $runConfig
+        } elseif (-not (Test-Path -LiteralPath $runConfig)) {
+            Copy-FileSafe -Src $configPath -Dst $runConfig
         }
+
+        Write-DetectedHardwareInfo
+        $backendFile = Join-Path $scriptDir "rwe_backend.txt"
+        $backendPref = $launch.backend
+        if ([string]::IsNullOrWhiteSpace($backendPref)) { $backendPref = "auto" }
+        if ($backendPref -eq "auto") {
+            if (Test-Path -LiteralPath $backendFile) {
+                $backendPref = (Get-Content -LiteralPath $backendFile -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+            if ([string]::IsNullOrWhiteSpace($backendPref)) {
+                $backendPref = Get-PreferredBackend
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($backendPref)) { $backendPref = "cpu" }
+        $verify = Test-BackendInPython -PythonPath $py -Backend $backendPref
+        if ($verify -ne 0) {
+            Write-Host ("Backend '{0}' failed to verify. Falling back to CPU." -f $backendPref) -ForegroundColor Yellow
+            $backendPref = "cpu"
+        }
+        Write-Host ("Selected backend: {0}" -f $backendPref) -ForegroundColor Green
+        $env:RWE_BACKEND = $backendPref
+
+        Write-Section "Validate config"
+        Validate-Config -ConfigPath $runConfig
+        Write-Host "Config OK." -ForegroundColor Green
+
+        $iters = $launch.iterations
+        if (-not $iters -or $iters -lt 1) {
+            $iters = Read-ConfigDefaultIterations -ConfigPath $runConfig -Fallback 10
+        }
+
+        $env:RWE_CONFIG = $runConfig
+        $env:RWE_OUT    = $outDir
+        $env:RWE_ITERS  = [string]$iters
+        if ($launch.show_images) { $env:RWE_SHOW_IMAGES = "1" }
+        if ($launch.hf_token) { $env:HF_TOKEN = $launch.hf_token }
+
+        $progressFile = Join-Path $runRoot "progress.jsonl"
+        $logFile = Join-Path $runRoot "run.log"
+        $errFile = Join-Path $runRoot "run.err.log"
+        $doneFlag = Join-Path $runRoot "done.flag"
+        $worldLog = Join-Path $outDir "world_log.jsonl"
+        $controlFile = Join-Path $runRoot "ui_control.json"
+        if (Test-Path -LiteralPath $doneFlag) { Remove-Item -LiteralPath $doneFlag -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $controlFile) { Remove-Item -LiteralPath $controlFile -Force -ErrorAction SilentlyContinue }
+
+        Write-ProgressEvent -Path $progressFile -Phase "setup" -Message "RWE startet..." -Percent 1
+
+        Write-Section "Start"
+        Write-Host ("Python: {0}" -f $py) -ForegroundColor Green
+        Write-Host ("Script: {0}" -f $rwePy) -ForegroundColor Green
+        Write-Host ("Output: {0}" -f $outDir) -ForegroundColor Green
+
+        $pyw = $null
+        try {
+            $cand = Join-Path (Split-Path -Parent $py) "pythonw.exe"
+            if (Test-Path -LiteralPath $cand) { $pyw = $cand }
+        } catch { }
+        if (-not $pyw) { $pyw = $py }
+
+        $runUiProc = Start-Process -FilePath $pyw -ArgumentList @(
+            $runUiPy,
+            "--run-root", $runRoot,
+            "--out-dir", $outDir,
+            "--progress-file", $progressFile,
+            "--log-file", $logFile,
+            "--error-log", $errFile,
+            "--world-log", $worldLog,
+            "--done-flag", $doneFlag,
+            "--control-file", $controlFile
+        ) -PassThru
+
+        Write-ProgressEvent -Path $progressFile -Phase "run" -Message "Generierung läuft..." -Percent 5
+
+        Hide-ConsoleWindow
+
+        $runProc = Start-Process -FilePath $py -ArgumentList @($rwePy) -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $logFile -RedirectStandardError $errFile
+
+        $requestedAction = ""
+        while ($true) {
+            try { $runProc.Refresh() } catch { }
+            if ($runProc.HasExited) { break }
+            $requestedAction = Read-UiAction -Path $controlFile
+            if ($requestedAction) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $requestedAction) {
+            $requestedAction = Read-UiAction -Path $controlFile
+        }
+
+        if ($requestedAction) {
+            Stop-ProcessSafe -Proc $runProc
+        }
+        try { $runProc.WaitForExit() } catch { }
+
+        $doneMessage = "Generierung abgeschlossen."
+        if ($requestedAction -eq "cancel") { $doneMessage = "Run cancelled." }
+        if ($requestedAction -eq "new") { $doneMessage = "Run stopped. Starting new run..." }
+
+        Write-ProgressEvent -Path $progressFile -Phase "done" -Message $doneMessage -Percent 100 -Close $true
+        Set-Content -LiteralPath $doneFlag -Value "done" -Encoding UTF8
+
+        if ($runUiProc -and -not $runUiProc.HasExited) {
+            Stop-ProcessSafe -Proc $runUiProc
+        }
+
+        if (Test-Path Env:\RWE_CONFIG) { Remove-Item Env:\RWE_CONFIG -ErrorAction SilentlyContinue }
+        if (Test-Path Env:\RWE_OUT) { Remove-Item Env:\RWE_OUT -ErrorAction SilentlyContinue }
+        if (Test-Path Env:\RWE_ITERS) { Remove-Item Env:\RWE_ITERS -ErrorAction SilentlyContinue }
+        if (Test-Path Env:\RWE_BACKEND) { Remove-Item Env:\RWE_BACKEND -ErrorAction SilentlyContinue }
+        if (Test-Path Env:\RWE_SHOW_IMAGES) { Remove-Item Env:\RWE_SHOW_IMAGES -ErrorAction SilentlyContinue }
+        if (Test-Path Env:\HF_TOKEN) { Remove-Item Env:\HF_TOKEN -ErrorAction SilentlyContinue }
+
+        if ($requestedAction -eq "new") {
+            if (Test-Path -LiteralPath $runRoot) {
+                Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            $keepRunning = $true
+            continue
+        }
+
+        if ($requestedAction -eq "cancel") {
+            break
+        }
+
+        $pdfPath = Join-Path (Join-Path $outDir "atlas") "rwe_atlas_v04.pdf"
+
+        Write-Section "Result"
+        Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
+        Write-Host ("Atlas PDF:  {0}" -f $pdfPath) -ForegroundColor Cyan
+
+        if (-not (Test-Path -LiteralPath $pdfPath)) {
+            Write-Host "PDF not found (generation failed or path changed)." -ForegroundColor Yellow
+        }
+
+        Write-Section "Slideshow"
+        & $py $slideshowPy --run-root $runRoot
+
+        Wait-ForEnter "Press Enter to exit..."
+        break
     }
-
-    if ([string]::IsNullOrWhiteSpace($backendPref)) { $backendPref = "cpu" }
-    $verify = Test-BackendInPython -PythonPath $py -Backend $backendPref
-    if ($verify -ne 0) {
-        Write-Host ("Backend '{0}' failed to verify. Falling back to CPU." -f $backendPref) -ForegroundColor Yellow
-        $backendPref = "cpu"
-    }
-    Write-Host ("Selected backend: {0}" -f $backendPref) -ForegroundColor Green
-    $env:RWE_BACKEND = $backendPref
-
-    Write-Section "Validate config"
-    Validate-Config -ConfigPath $runConfig
-    Write-Host "Config OK." -ForegroundColor Green
-
-    $iters = $launch.iterations
-    if (-not $iters -or $iters -lt 1) {
-        $iters = Read-ConfigDefaultIterations -ConfigPath $runConfig -Fallback 10
-    }
-
-    $env:RWE_CONFIG = $runConfig
-    $env:RWE_OUT    = $outDir
-    $env:RWE_ITERS  = [string]$iters
-    if ($launch.show_images) { $env:RWE_SHOW_IMAGES = "1" }
-    if ($launch.hf_token) { $env:HF_TOKEN = $launch.hf_token }
-
-    $progressFile = Join-Path $runRoot "progress.jsonl"
-    $logFile = Join-Path $runRoot "run.log"
-    $errFile = Join-Path $runRoot "run.err.log"
-    $doneFlag = Join-Path $runRoot "done.flag"
-    $worldLog = Join-Path $outDir "world_log.jsonl"
-    if (Test-Path -LiteralPath $doneFlag) { Remove-Item -LiteralPath $doneFlag -Force -ErrorAction SilentlyContinue }
-
-    Write-ProgressEvent -Path $progressFile -Phase "setup" -Message "RWE startet..." -Percent 1
-
-    Write-Section "Start"
-    Write-Host ("Python: {0}" -f $py) -ForegroundColor Green
-    Write-Host ("Script: {0}" -f $rwePy) -ForegroundColor Green
-    Write-Host ("Output: {0}" -f $outDir) -ForegroundColor Green
-
-    $pyw = $null
-    try {
-        $cand = Join-Path (Split-Path -Parent $py) "pythonw.exe"
-        if (Test-Path -LiteralPath $cand) { $pyw = $cand }
-    } catch { }
-    if (-not $pyw) { $pyw = $py }
-
-    $runUiProc = Start-Process -FilePath $pyw -ArgumentList @(
-        $runUiPy,
-        "--run-root", $runRoot,
-        "--out-dir", $outDir,
-        "--progress-file", $progressFile,
-        "--log-file", $logFile,
-        "--error-log", $errFile,
-        "--world-log", $worldLog,
-        "--done-flag", $doneFlag
-    ) -PassThru
-
-    Write-ProgressEvent -Path $progressFile -Phase "run" -Message "Generierung läuft..." -Percent 5
-
-    Hide-ConsoleWindow
-
-    $runProc = Start-Process -FilePath $py -ArgumentList @($rwePy) -WindowStyle Hidden -PassThru -Wait `
-        -RedirectStandardOutput $logFile -RedirectStandardError $errFile
-
-    Write-ProgressEvent -Path $progressFile -Phase "done" -Message "Generierung abgeschlossen." -Percent 100 -Close $true
-    Set-Content -LiteralPath $doneFlag -Value "done" -Encoding UTF8
-
-    if (Test-Path Env:\RWE_CONFIG) { Remove-Item Env:\RWE_CONFIG -ErrorAction SilentlyContinue }
-    if (Test-Path Env:\RWE_OUT) { Remove-Item Env:\RWE_OUT -ErrorAction SilentlyContinue }
-    if (Test-Path Env:\RWE_ITERS) { Remove-Item Env:\RWE_ITERS -ErrorAction SilentlyContinue }
-    if (Test-Path Env:\RWE_BACKEND) { Remove-Item Env:\RWE_BACKEND -ErrorAction SilentlyContinue }
-    if (Test-Path Env:\RWE_SHOW_IMAGES) { Remove-Item Env:\RWE_SHOW_IMAGES -ErrorAction SilentlyContinue }
-    if (Test-Path Env:\HF_TOKEN) { Remove-Item Env:\HF_TOKEN -ErrorAction SilentlyContinue }
-
-    $pdfPath = Join-Path (Join-Path $outDir "atlas") "rwe_atlas_v04.pdf"
-
-    Write-Section "Result"
-    Write-Host ("Run folder: {0}" -f $runRoot) -ForegroundColor Cyan
-    Write-Host ("Atlas PDF:  {0}" -f $pdfPath) -ForegroundColor Cyan
-
-    if (-not (Test-Path -LiteralPath $pdfPath)) {
-        Write-Host "PDF not found (generation failed or path changed)." -ForegroundColor Yellow
-    }
-
-    Write-Section "Slideshow"
-    & $py $slideshowPy --run-root $runRoot
-
-    Wait-ForEnter "Press Enter to exit..."
 } catch {
     Show-ErrorAndWait "Fatal error." $_.Exception
 }

@@ -99,6 +99,7 @@ class RweRunUi(tk.Tk):
         error_log_file: str,
         world_log_jsonl: str,
         done_flag: str,
+        control_file: str,
     ):
         super().__init__()
         self.title("RealWorldEngine — Run")
@@ -112,8 +113,10 @@ class RweRunUi(tk.Tk):
         self.error_log_file = error_log_file
         self.world_log_jsonl = world_log_jsonl
         self.done_flag = done_flag
+        self.control_file = control_file
 
         self.state = UiState(last_record={})
+        self._requested_action = None
 
         self._img_tk = None
         self._last_img_loaded = ""
@@ -142,14 +145,16 @@ class RweRunUi(tk.Tk):
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
-        if "clam" in style.theme_names():
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+        elif "clam" in style.theme_names():
             style.theme_use("clam")
 
-        bg = "#0f1115"
-        panel = "#161a22"
-        accent = "#4cc3ff"
-        text = "#e6edf7"
-        muted = "#9aa4b2"
+        bg = "#f3f5f7"
+        panel = "#ffffff"
+        accent = "#0078d4"
+        text = "#1f1f1f"
+        muted = "#5a5a5a"
 
         self.configure(bg=bg)
         style.configure("TFrame", background=bg)
@@ -158,7 +163,7 @@ class RweRunUi(tk.Tk):
         style.configure("Muted.TLabel", background=bg, foreground=muted)
         style.configure("Title.TLabel", background=bg, foreground=text, font=("Segoe UI", 16, "bold"))
         style.configure("Section.TLabel", background=bg, foreground=text, font=("Segoe UI", 12, "bold"))
-        style.configure("TProgressbar", background=accent, troughcolor="#202635", bordercolor="#202635")
+        style.configure("TProgressbar", background=accent, troughcolor="#d9e2ef", bordercolor="#d9e2ef")
 
         self._ui_colors = {
             "bg": bg,
@@ -221,7 +226,7 @@ class RweRunUi(tk.Tk):
             insertbackground=self._ui_colors["text"],
             borderwidth=0,
             highlightthickness=1,
-            highlightbackground="#202635",
+            highlightbackground="#ccd6e6",
             highlightcolor=self._ui_colors["accent"],
             font=("Segoe UI", 10),
         )
@@ -239,12 +244,12 @@ class RweRunUi(tk.Tk):
         self.txt_log = tk.Text(
             log_frame,
             wrap="none",
-            background="#0b0f14",
-            foreground="#d6e0ff",
-            insertbackground="#d6e0ff",
+            background="#f9fafb",
+            foreground="#1f1f1f",
+            insertbackground="#1f1f1f",
             borderwidth=0,
             highlightthickness=1,
-            highlightbackground="#202635",
+            highlightbackground="#ccd6e6",
             highlightcolor=self._ui_colors["accent"],
             font=("Cascadia Mono", 10),
         )
@@ -262,12 +267,45 @@ class RweRunUi(tk.Tk):
         self.lbl_path = ttk.Label(bottom, text="", style="Muted.TLabel")
         self.lbl_path.grid(row=0, column=0, sticky="w")
 
+        self.btn_frame = ttk.Frame(bottom)
+        self.btn_frame.grid(row=0, column=1, sticky="e")
+
+        self.btn_cancel = ttk.Button(self.btn_frame, text="Cancel", command=lambda: self._request_action("cancel"))
+        self.btn_cancel.pack(side=tk.RIGHT, padx=(8, 0))
+        self.btn_new = ttk.Button(self.btn_frame, text="New", command=lambda: self._request_action("new"))
+        self.btn_new.pack(side=tk.RIGHT)
+
     def _on_close(self) -> None:
-        if self.state.done:
+        if self.state.done or self._requested_action:
             self._stop.set()
             self.destroy()
             return
         self.lbl_msg.configure(text="Run is still active. This window will close automatically when the run is finished.")
+
+    def _request_action(self, action: str) -> None:
+        if self._requested_action:
+            return
+        if self.state.done:
+            self._stop.set()
+            self.destroy()
+            return
+        if action not in {"cancel", "new"}:
+            return
+        payload = {"action": action, "ts": time.time()}
+        try:
+            if self.control_file:
+                with open(self.control_file, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        self._requested_action = action
+        status = "Stopping run…" if action == "cancel" else "Preparing new run…"
+        self.lbl_msg.configure(text=status)
+        try:
+            self.btn_cancel.configure(state="disabled")
+            self.btn_new.configure(state="disabled")
+        except Exception:
+            pass
 
     def _set_text(self, widget: tk.Text, text: str) -> None:
         widget.configure(state="normal")
@@ -375,6 +413,8 @@ class RweRunUi(tk.Tk):
         msg = self.state.message.strip()
         if self.state.done:
             msg = "Done. You can close this window."
+        if self._requested_action and not self.state.done:
+            msg = "Stopping run…" if self._requested_action == "cancel" else "Preparing new run…"
         self.lbl_msg.configure(text=msg)
         self.pbar["value"] = max(0, min(100, self.state.percent))
 
@@ -387,6 +427,10 @@ class RweRunUi(tk.Tk):
 
         if self.done_flag and os.path.exists(self.done_flag):
             self.state.done = True
+            if self._requested_action:
+                self._stop.set()
+                self.destroy()
+                return
 
         self.after(700, self._poll)
 
@@ -399,6 +443,7 @@ def main() -> int:
     ap.add_argument("--world-log", required=True)
     ap.add_argument("--done-flag", required=True)
     ap.add_argument("--error-log", default="")
+    ap.add_argument("--control-file", default="")
     args = ap.parse_args()
 
     ui = RweRunUi(
@@ -409,6 +454,7 @@ def main() -> int:
         error_log_file=args.error_log,
         world_log_jsonl=args.world_log,
         done_flag=args.done_flag,
+        control_file=args.control_file,
     )
     ui.mainloop()
     return 0
